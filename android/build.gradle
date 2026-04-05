@@ -11,6 +11,24 @@ android {
     targetSdk 35
   }
 
+  // ─── OSS-First SDK Configuration ──────────────────────────────────────────────
+  // By default, this SDK expects the 'sankofa-android' Maven artifact to be available.
+  //
+  // AUTOMATIC MONOREPO DETECTION:
+  // If the sibling 'sankofa_sdk_android' folder exists, we automatically switch to
+  // local source mode for a seamless developer experience inside the monorepo.
+  // ─────────────────────────────────────────────────────────────────────────────
+  def useSourceSdk = (project.hasProperty('sankofa.sourceSdk') && project.getProperty('sankofa.sourceSdk') == "true") || 
+                     new File(projectDir, "../../sankofa_sdk_android/sankofa").exists()
+
+  if (useSourceSdk) {
+    sourceSets {
+      main {
+        java.srcDirs += ["../../sankofa_sdk_android/sankofa/src/main/java"]
+      }
+    }
+  }
+
   buildFeatures {
     buildConfig false
   }
@@ -26,12 +44,26 @@ android {
 }
 
 dependencies {
-  // Expo Modules Core — provides Module, ModuleDefinition, appContext, etc.
   implementation project(':expo-modules-core')
 
-  // Sankofa Android SDK — included as a local project dependency.
-  // In the example app's settings.gradle, add:
-  //   include ':sankofa'
-  //   project(':sankofa').projectDir = new File('../../sdks/sankofa_sdk_android/sankofa')
-  implementation project(':sankofa')
+  def useSourceSdk = (project.hasProperty('sankofa.sourceSdk') && project.getProperty('sankofa.sourceSdk') == "true") || 
+                     new File(projectDir, "../../sankofa_sdk_android/sankofa").exists()
+
+  if (useSourceSdk) {
+    // ─── LOCAL DEVELOPMENT MODE ──────────────────────────────────────────────
+    // We mirror the dependencies of the core Android SDK here for successful compilation.
+    implementation "androidx.core:core-ktx:1.13.1"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1"
+    implementation "androidx.room:room-runtime:2.6.1"
+    implementation "androidx.room:room-ktx:2.6.1"
+    implementation "androidx.work:work-runtime-ktx:2.9.0"
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
+    implementation "com.google.code.gson:gson:2.10.1"
+    implementation "androidx.lifecycle:lifecycle-process:2.8.3"
+    implementation "androidx.lifecycle:lifecycle-common-java8:2.8.3"
+  } else {
+    // ─── PRODUCTION / OSS MODE ───────────────────────────────────────────────
+    // Link against the published Sankofa Android Maven artifact.
+    implementation 'dev.sankofa.sdk:sankofa-android:1.0.0'
+  }
 }

@@ -1,0 +1,36 @@
+# Dependency directories
+node_modules/
+
+# Build artifacts
+android/build/
+ios/build/
+ios/DerivedData/
+*.app
+*.ipa
+*.apk
+
+# Expo / Managed workflow
+.expo/
+*.jks
+*.p12
+*.key
+*.mobileprovision
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+.history
+
+# Native folders in Expo projects are usually ignored if using prebuild
+# But for an SDK, we want to allow theios/ and android/ bridge code.
+# We only ignore build outputs.
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Typescript
+dist/
+lib/

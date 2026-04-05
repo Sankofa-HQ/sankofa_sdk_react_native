@@ -4,26 +4,6 @@
 
 ---
 
-## Architecture
-
-```
-sankofa-react-native (this package)
-├── src/                        JavaScript / TypeScript public API
-│   ├── index.ts               Barrel: exports Sankofa object + useSankofaScreen
-│   ├── SankofaModule.ts       requireNativeModule('Sankofa') wrapper
-│   ├── SankofaTypes.ts        TypeScript interface for SankofaConfig
-│   └── hooks/
-│       └── useSankofaScreen.ts  ← The primary developer hook
-├── ios/
-│   └── SankofaModule.swift    Expo Module → SankofaIOS.Sankofa.shared
-└── android/
-    └── SankofaModule.kt       Expo Module → dev.sankofa.sdk.Sankofa
-```
-
-The native session replay runs **entirely on the native layer** — iOS screenshots via `UIWindow` and Android via the existing `ReplayRecorder`. No JS-side screen capture needed.
-
----
-
 ## Installation
 
 ```bash
@@ -34,7 +14,7 @@ npm install sankofa-react-native
 yarn add sankofa-react-native
 ```
 
-> ⚠️ This package requires a **development build** (`expo run:ios` / `expo run:android`). It will not work in Expo Go.
+> ⚠️ This package requires a **development build** (`expo run:ios` / `expo run:android`). Native modules for session replay and heatmaps are not supported in Expo Go.
 
 ---
 
@@ -47,20 +27,20 @@ yarn add sankofa-react-native
 import { Sankofa } from 'sankofa-react-native';
 
 Sankofa.initialize('YOUR_API_KEY', {
-  endpoint: 'https://api.sankofa.dev',
+  endpoint: 'https://api.sankofa.dev', // optional
   recordSessions: true,
-  debug: true,           // disable in production
+  debug: __DEV__,
 });
 ```
 
-### 2. Tag every screen with one hook
+### 2. Tag screens with the hook
 
 ```tsx
 import { useSankofaScreen, Sankofa } from 'sankofa-react-native';
 
 const CheckoutScreen = () => {
-  // 🚀 One line. Auto-tags the screen when the component mounts.
-  useSankofaScreen('Checkout - Empty');
+  // 🚀 Automatically tags the screen context for heatmaps
+  useSankofaScreen('Checkout');
 
   return (
     <View>
@@ -68,21 +48,9 @@ const CheckoutScreen = () => {
         onPress={() => Sankofa.track('pay_clicked')}
         title="Pay"
       />
-      {/* The SDK automatically knows this click happened on "Checkout - Empty" */}
     </View>
   );
 };
-```
-
-### 3. Identify users
-
-```tsx
-// On login
-Sankofa.identify('user_42');
-Sankofa.setPerson({ name: 'Kofi Boateng', email: 'kofi@sankofa.dev' });
-
-// On logout
-Sankofa.reset();
 ```
 
 ---
@@ -91,62 +59,32 @@ Sankofa.reset();
 
 | Method | Description |
 |--------|-------------|
-| `Sankofa.initialize(apiKey, config?)` | Initialize the SDK. Call once at app start. |
-| `useSankofaScreen(name)` | Hook — tags the current screen on mount / name change. |
-| `Sankofa.screen(name, props?)` | Imperative version of `useSankofaScreen`. |
-| `Sankofa.track(event, props?)` | Track a custom event. `$screen_name` is auto-injected. |
+| `Sankofa.initialize(apiKey, config?)` | Initialize the SDK at app start. |
+| `useSankofaScreen(name)` | Hook — tags the current screen for contextual heatmaps. |
+| `Sankofa.track(event, props?)` | Track custom events. `$screen_name` is auto-injected. |
 | `Sankofa.identify(userId)` | Link anonymous session to a known user. |
-| `Sankofa.setPerson(traits)` | Set profile attributes (`name`, `email`, `avatar`, …). |
-| `Sankofa.reset()` | Clear identity & start a fresh anonymous session (logout). |
-| `Sankofa.flush()` | Force-upload all queued events immediately. |
-
-### `SankofaConfig`
-
-```ts
-interface SankofaConfig {
-  endpoint?:            string;   // default: 'https://api.sankofa.dev'
-  debug?:               boolean;  // default: false
-  trackLifecycleEvents?: boolean; // default: true
-  recordSessions?:      boolean;  // default: true
-  maskAllInputs?:       boolean;  // default: true
-  flushIntervalSeconds?: number;  // default: 30
-  batchSize?:           number;   // default: 50
-}
-```
-
----
-
-## Example App
-
-See [`example/sankofa_example_react_native`](../../example/sankofa_example_react_native/) for a full Expo SDK 52 demo with:
-- **Home** — live event tracker with 6 quick-fire buttons
-- **Identify** — user identity flow
-- **Replay** — dynamic screen-name switching demo
-
-```bash
-cd example/sankofa_example_react_native
-npm install
-npm run ios      # or: npm run android
-```
+| `Sankofa.setPerson(traits)` | Set profile attributes (`name`, `email`, etc.). |
+| `Sankofa.reset()` | Clear identity & start a fresh session (logout). |
 
 ---
 
 ## Native Linking
 
-### iOS (CocoaPods)
+This package follows standard React Native autolinking. 
 
-The `SankofaReactNative.podspec` compiles the `SankofaIOS` Swift sources directly alongside the Expo bridge — no separate SPM dependency needed. `expo prebuild` handles pod installation automatically.
+- **iOS**: Uses CocoaPods. Run `pod install` in your `ios/` directory (or `npx expo run:ios`).
+- **Android**: Uses Gradle. Dependencies are resolved automatically via Maven Central.
 
-### Android (Gradle)
+---
 
-Add to your `settings.gradle`:
+## Local Development (Monorepo)
 
-```groovy
-include ':sankofa'
-project(':sankofa').projectDir = new File('../../sdks/sankofa_sdk_android/sankofa')
-```
+If you are a contributor working inside the Sankofa monorepo, the SDK **automatically detects** the sibling native SDKs and links to their source code for a seamless development experience. No manual configuration is required.
 
-The `expo-modules-core` auto-discovery registers `SankofaPackage` via `AndroidManifest.xml` — no `MainApplication.kt` edits required.
+- **iOS**: Automatically links `sankofa_sdk_ios`.
+- **Android**: Automatically links `sankofa_sdk_android`.
+
+For external contributors who wish to force a specific mode, you can still use the `SANKOFA_SOURCE_SDK=1` (iOS) or `sankofa.sourceSdk=true` (Android) overrides.
 
 ---
 
