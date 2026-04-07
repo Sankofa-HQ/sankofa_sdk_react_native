@@ -20,7 +20,10 @@ class SankofaModule : Module() {
 
     // ── initialize ──────────────────────────────────────────────────────────
     Function("initialize") { apiKey: String, config: Map<String, Any?> ->
-      val ctx = appContext.reactContext?.applicationContext ?: return@Function
+      val ctx = appContext.reactContext?.applicationContext ?: run {
+        android.util.Log.w("SankofaModule", "Sankofa: applicationContext unavailable — initialize() skipped.")
+        return@Function
+      }
       val sdkConfig = SankofaConfig(
         endpoint            = config["endpoint"] as? String ?: "https://api.sankofa.dev",
         debug               = config["debug"] as? Boolean ?: false,

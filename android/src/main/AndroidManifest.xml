@@ -1,13 +1,2 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-  <application>
-    <!--
-      Registers SankofaPackage with the Expo Modules auto-discovery system.
-      This is how expo-modules-core knows to install our native module
-      without requiring manual MainApplication.kt edits.
-    -->
-    <meta-data
-      android:name="expo.modules.core.ExpoModulesPackageList"
-      android:value="dev.sankofa.rn.SankofaPackage" />
-  </application>
-</manifest>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

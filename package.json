@@ -8,7 +8,8 @@
     "src",
     "ios",
     "android",
-    "*.podspec"
+    "*.podspec",
+    "expo-module.config.json"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -19,7 +20,8 @@
     "analytics",
     "heatmap",
     "session-replay",
-    "sankofa"
+    "sankofa",
+    "expo"
   ],
   "repository": {
     "type": "git",

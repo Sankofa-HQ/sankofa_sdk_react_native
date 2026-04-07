@@ -1,36 +1,75 @@
-# Dependency directories
+# ─── Dependencies ────────────────────────────────────────────────────────────
 node_modules/
 
-# Build artifacts
-android/build/
+# ─── TypeScript / JS build output ────────────────────────────────────────────
+dist/
+lib/
+*.tsbuildinfo
+
+# ─── iOS ────────────────────────────────────────────────────────────────────
+# SankofaIOS sources are copied in by SankofaReactNative.podspec's
+# prepare_command at install time — never commit the copy.
+ios/SankofaIOS/
+
+# Swift Package Manager (left over if anyone runs `swift build` here)
+.build/
+.swiftpm/
+Package.resolved
+
+# CocoaPods + Xcode build outputs
+ios/Pods/
 ios/build/
 ios/DerivedData/
-*.app
-*.ipa
-*.apk
+ios/*.xcworkspace/xcuserdata/
+ios/*.xcodeproj/xcuserdata/
+ios/*.xcodeproj/project.xcworkspace/xcuserdata/
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
 
-# Expo / Managed workflow
-.expo/
+# iOS signing / secrets
 *.jks
+*.p8
 *.p12
 *.key
 *.mobileprovision
+*.pem
 
-# OS-specific files
-.DS_Store
-Thumbs.db
-.history
+# ─── Android ────────────────────────────────────────────────────────────────
+android/build/
+android/.gradle/
+android/.cxx/
+android/.kotlin/
+android/local.properties
+android/captures/
+android/.idea/
+*.aar
+*.ap_
 
-# Native folders in Expo projects are usually ignored if using prebuild
-# But for an SDK, we want to allow theios/ and android/ bridge code.
-# We only ignore build outputs.
+# ─── Expo / Metro ───────────────────────────────────────────────────────────
+.expo/
+.metro-health-check*
 
-# IDEs
+# ─── IDE ────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
+*.iml
 
-# Typescript
-dist/
-lib/
+# ─── OS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.history/
+
+# ─── Logs / debug ───────────────────────────────────────────────────────────
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.log
+
+# ─── Misc ───────────────────────────────────────────────────────────────────
+*.orig.*
+*.app
+*.ipa
+*.apk

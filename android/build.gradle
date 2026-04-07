@@ -1,69 +1,37 @@
-apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
-apply plugin: 'expo-module'
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// android/build.gradle
+//
+// Thin Expo Module bridge — all analytics logic lives in the sankofa-android
+// Maven artifact (the native Android SDK).
+//
+// For monorepo / local development, the example app's settings.gradle uses
+// a Gradle composite build to substitute the dependency:
+//
+//   includeBuild('../../../sdks/sankofa_sdk_android') {
+//       dependencySubstitution {
+//           substitute module('dev.sankofa.sdk:sankofa-android') using project(':sankofa')
+//       }
+//   }
+//
+// For production installs, the AAR resolves from Maven Central.
+// ─────────────────────────────────────────────────────────────────────────────
+
+group = 'dev.sankofa.rn'
+version = '0.1.0'
 
 android {
   namespace 'dev.sankofa.rn'
-  compileSdk 35
-
   defaultConfig {
-    minSdk 23
-    targetSdk 35
-  }
-
-  // ─── OSS-First SDK Configuration ──────────────────────────────────────────────
-  // By default, this SDK expects the 'sankofa-android' Maven artifact to be available.
-  //
-  // AUTOMATIC MONOREPO DETECTION:
-  // If the sibling 'sankofa_sdk_android' folder exists, we automatically switch to
-  // local source mode for a seamless developer experience inside the monorepo.
-  // ─────────────────────────────────────────────────────────────────────────────
-  def useSourceSdk = (project.hasProperty('sankofa.sourceSdk') && project.getProperty('sankofa.sourceSdk') == "true") || 
-                     new File(projectDir, "../../sankofa_sdk_android/sankofa").exists()
-
-  if (useSourceSdk) {
-    sourceSets {
-      main {
-        java.srcDirs += ["../../sankofa_sdk_android/sankofa/src/main/java"]
-      }
-    }
-  }
-
-  buildFeatures {
-    buildConfig false
-  }
-
-  compileOptions {
-    sourceCompatibility JavaVersion.VERSION_17
-    targetCompatibility JavaVersion.VERSION_17
-  }
-
-  kotlinOptions {
-    jvmTarget = '17'
+    versionCode 1
+    versionName '0.1.0'
   }
 }
 
 dependencies {
-  implementation project(':expo-modules-core')
-
-  def useSourceSdk = (project.hasProperty('sankofa.sourceSdk') && project.getProperty('sankofa.sourceSdk') == "true") || 
-                     new File(projectDir, "../../sankofa_sdk_android/sankofa").exists()
-
-  if (useSourceSdk) {
-    // ─── LOCAL DEVELOPMENT MODE ──────────────────────────────────────────────
-    // We mirror the dependencies of the core Android SDK here for successful compilation.
-    implementation "androidx.core:core-ktx:1.13.1"
-    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1"
-    implementation "androidx.room:room-runtime:2.6.1"
-    implementation "androidx.room:room-ktx:2.6.1"
-    implementation "androidx.work:work-runtime-ktx:2.9.0"
-    implementation "com.squareup.okhttp3:okhttp:4.12.0"
-    implementation "com.google.code.gson:gson:2.10.1"
-    implementation "androidx.lifecycle:lifecycle-process:2.8.3"
-    implementation "androidx.lifecycle:lifecycle-common-java8:2.8.3"
-  } else {
-    // ─── PRODUCTION / OSS MODE ───────────────────────────────────────────────
-    // Link against the published Sankofa Android Maven artifact.
-    implementation 'dev.sankofa.sdk:sankofa-android:1.0.0'
-  }
+  implementation 'dev.sankofa.sdk:sankofa-android:1.0.0'
 }
