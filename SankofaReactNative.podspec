@@ -12,13 +12,19 @@ package = JSON.parse(File.read(File.join(__dir__, 'package.json')))
 # The SankofaIOS native SDK sources are embedded at install time:
 #   • In monorepo development: prepare_command copies the sibling
 #     sankofa_sdk_ios/Sources/SankofaIOS/ directory into ios/SankofaIOS/.
-#   • When published to the CocoaPods registry: the sources are already
-#     present in the pod tarball (the registry runs prepare_command before
-#     packaging).
+#   • In standalone installs: prepare_command clones the SankofaIOS repo
+#     directly from GitHub at the pinned ref below and copies its Sources
+#     into ios/SankofaIOS/.
+#
+# Pinning is done by branch name for now; switch to a tag once SankofaIOS
+# starts cutting releases (e.g. SANKOFA_IOS_REF = 'v1.0.0').
 #
 # GRDB.swift (>= 6.0) is available on CocoaPods trunk and satisfies the async
 # read/write APIs used by SankofaQueueManager.
 # ─────────────────────────────────────────────────────────────────────────────
+
+SANKOFA_IOS_REPO = 'https://github.com/Sankofa-HQ/sankofa_sdk_ios.git'
+SANKOFA_IOS_REF  = 'main'
 
 Pod::Spec.new do |s|
   s.name           = 'SankofaReactNative'
@@ -32,18 +38,24 @@ Pod::Spec.new do |s|
   s.swift_version  = '5.9'
   s.platforms      = { ios: '14.0' }
 
-  # Copy SankofaIOS sources from the sibling native SDK (monorepo) or
-  # verify they are already present (published pod tarball).
+  # Embed SankofaIOS sources at install time:
+  #   1. Prefer the sibling sankofa_sdk_ios/ directory (monorepo dev mode).
+  #   2. Otherwise clone the repo from GitHub at the pinned ref.
+  # Either way, the sources end up in ios/SankofaIOS/ and are compiled as
+  # part of this pod's target — no extra entries in the consumer Podfile.
   s.prepare_command = <<-CMD
+    set -e
+    rm -rf "ios/SankofaIOS"
     if [ -d "../sankofa_sdk_ios/Sources/SankofaIOS" ]; then
-      rm -rf "ios/SankofaIOS"
       cp -R "../sankofa_sdk_ios/Sources/SankofaIOS" "ios/SankofaIOS"
       echo "[SankofaReactNative] Embedded SankofaIOS sources from sibling SDK."
-    elif [ ! -d "ios/SankofaIOS" ]; then
-      echo "[SankofaReactNative] ERROR: ios/SankofaIOS sources not found."
-      echo "  Run pod install from the monorepo root, or ensure the"
-      echo "  published pod tarball includes ios/SankofaIOS/."
-      exit 1
+    else
+      TMP_DIR="$(mktemp -d)"
+      echo "[SankofaReactNative] Cloning SankofaIOS from #{SANKOFA_IOS_REPO} (#{SANKOFA_IOS_REF})..."
+      git clone --depth 1 --branch "#{SANKOFA_IOS_REF}" "#{SANKOFA_IOS_REPO}" "$TMP_DIR" >/dev/null 2>&1
+      cp -R "$TMP_DIR/Sources/SankofaIOS" "ios/SankofaIOS"
+      rm -rf "$TMP_DIR"
+      echo "[SankofaReactNative] Embedded SankofaIOS sources from GitHub."
     fi
   CMD
 
