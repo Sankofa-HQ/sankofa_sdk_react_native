@@ -1,5 +1,7 @@
 package dev.sankofa.rn
 
+import android.os.Handler
+import android.os.Looper
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import dev.sankofa.sdk.Sankofa
@@ -15,10 +17,22 @@ import dev.sankofa.sdk.SankofaConfig
  */
 class SankofaModule : Module() {
 
+  private val mainHandler = Handler(Looper.getMainLooper())
+
+  private inline fun runOnMain(crossinline block: () -> Unit) {
+    if (Looper.myLooper() == Looper.getMainLooper()) block()
+    else mainHandler.post { block() }
+  }
+
   override fun definition() = ModuleDefinition {
     Name("Sankofa")
 
     // ── initialize ──────────────────────────────────────────────────────────
+    // Sankofa.init() registers a ProcessLifecycleOwner observer, which the
+    // androidx.lifecycle library requires to be called on the main thread.
+    // Expo Module Function {} blocks run on the JS/module thread, so we must
+    // dispatch to the main looper. (This mirrors the iOS bridge's
+    // DispatchQueue.main.async wrapper.)
     Function("initialize") { apiKey: String, config: Map<String, Any?> ->
       val ctx = appContext.reactContext?.applicationContext ?: run {
         android.util.Log.w("SankofaModule", "Sankofa: applicationContext unavailable — initialize() skipped.")
@@ -33,7 +47,9 @@ class SankofaModule : Module() {
         flushIntervalSeconds= (config["flushIntervalSeconds"] as? Number)?.toInt() ?: 30,
         batchSize           = (config["batchSize"] as? Number)?.toInt() ?: 50,
       )
-      Sankofa.init(context = ctx, apiKey = apiKey, config = sdkConfig)
+      runOnMain {
+        Sankofa.init(context = ctx, apiKey = apiKey, config = sdkConfig)
+      }
     }
 
     // ── screen ───────────────────────────────────────────────────────────────
