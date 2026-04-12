@@ -86,5 +86,85 @@ public class SankofaModule: Module {
     Function("flush") {
       Sankofa.shared.flush()
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // DEPLOY — OTA bundle download, verify, and reload
+    // ═══════════════════════════════════════════════════════════════════
+
+    // Downloads a gzipped JS bundle, decompresses, verifies SHA256,
+    // saves to the app's Documents directory. Returns the local path.
+    AsyncFunction("deployDownloadBundle") { (url: String, expectedSha256: String, promise: Promise) in
+      DispatchQueue.global(qos: .userInitiated).async {
+        do {
+          guard let downloadUrl = URL(string: url) else {
+            promise.reject("ERR_INVALID_URL", "Invalid bundle URL")
+            return
+          }
+
+          let fm = FileManager.default
+          let deployDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("sankofa_deploy", isDirectory: true)
+          try? fm.createDirectory(at: deployDir, withIntermediateDirectories: true)
+
+          let tempFile = deployDir.appendingPathComponent("bundle_temp.jsbundle.gz")
+          let finalFile = deployDir.appendingPathComponent("bundle.jsbundle")
+
+          // 1. Download
+          let data = try Data(contentsOf: downloadUrl)
+          try data.write(to: tempFile)
+
+          // 2. Decompress gzip
+          let decompressed = try Data(contentsOf: tempFile).gunzipped()
+          try decompressed.write(to: finalFile)
+          try? fm.removeItem(at: tempFile)
+
+          // 3. Verify SHA256
+          let hash = decompressed.sha256Hex()
+          guard hash == expectedSha256 else {
+            try? fm.removeItem(at: finalFile)
+            promise.reject("ERR_HASH_MISMATCH", "SHA256 mismatch: expected=\(expectedSha256) actual=\(hash)")
+            return
+          }
+
+          // 4. Persist the bundle path
+          UserDefaults.standard.set(finalFile.path, forKey: "sankofa_deploy_bundle_path")
+
+          promise.resolve(finalFile.path)
+        } catch {
+          promise.reject("ERR_DOWNLOAD", "Bundle download failed: \(error.localizedDescription)")
+        }
+      }
+    }
+
+    // Returns the path of the installed OTA bundle, or nil.
+    Function("deployGetBundlePath") { () -> String? in
+      guard let path = UserDefaults.standard.string(forKey: "sankofa_deploy_bundle_path"),
+            FileManager.default.fileExists(atPath: path) else {
+        return nil
+      }
+      return path
+    }
+
+    // Deletes the OTA bundle and resets to the embedded bundle.
+    Function("deployClearBundle") {
+      if let path = UserDefaults.standard.string(forKey: "sankofa_deploy_bundle_path") {
+        try? FileManager.default.removeItem(atPath: path)
+      }
+      UserDefaults.standard.removeObject(forKey: "sankofa_deploy_bundle_path")
+    }
+
+    // Triggers a JS bundle reload.
+    Function("deployReload") {
+      DispatchQueue.main.async {
+        // Try Expo Updates first
+        if let updatesClass = NSClassFromString("EXUpdatesAppController") as? NSObject.Type,
+           let controller = updatesClass.value(forKey: "sharedInstance") as? NSObject {
+          controller.perform(NSSelectorFromString("requestRelaunch"))
+          return
+        }
+        // Fallback: RCTBridge reload
+        NotificationCenter.default.post(name: NSNotification.Name("RCTBridgeWillReloadNotification"), object: nil)
+      }
+    }
   }
 }

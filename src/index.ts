@@ -36,6 +36,15 @@ export interface HandshakeModules {
   };
 }
 
+/** Shared config set by Sankofa.initialize(). Readable by SankofaDeploy. */
+let _sharedApiKey: string = '';
+let _sharedEndpoint: string = 'https://api.sankofa.dev';
+
+/** Returns the API key from the last Sankofa.initialize() call. */
+export function getSharedApiKey(): string { return _sharedApiKey; }
+/** Returns the endpoint from the last Sankofa.initialize() call. */
+export function getSharedEndpoint(): string { return _sharedEndpoint; }
+
 /** Cached handshake response. Readable by SankofaDeploy and other modules. */
 let _handshakeModules: HandshakeModules | null = null;
 let _handshakePromise: Promise<HandshakeModules | null> | null = null;
@@ -97,6 +106,10 @@ export const Sankofa = {
    */
   initialize(apiKey: string, config: SankofaConfig = {}): void {
     const endpoint = config.endpoint ?? 'https://api.sankofa.dev';
+
+    // Store for SankofaDeploy and other modules to read
+    _sharedApiKey = apiKey;
+    _sharedEndpoint = endpoint;
 
     // 1. Initialize native layer (sync — bridges to Swift/Kotlin)
     SankofaNativeModule.initialize(apiKey, {

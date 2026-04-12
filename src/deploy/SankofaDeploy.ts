@@ -1,6 +1,7 @@
 import { AppState, Platform } from 'react-native';
+import SankofaNativeModule from '../SankofaModule';
 import { DeployStorage } from './DeployStorage';
-import { waitForHandshake, getHandshakeModules } from '../index';
+import { waitForHandshake, getHandshakeModules, getSharedApiKey, getSharedEndpoint } from '../index';
 import type {
   DeployConfig,
   UpdateCheckResult,
@@ -47,10 +48,10 @@ export class SankofaDeploy {
   private appStateSubscription: any = null;
   private lastBackgroundTime: number = 0;
 
-  constructor(config: DeployConfig) {
+  constructor(config: DeployConfig = {}) {
     this.config = {
-      apiKey: config.apiKey || '',
-      serverUrl: config.serverUrl || 'https://api.sankofa.dev',
+      apiKey: config.apiKey || getSharedApiKey(),
+      serverUrl: config.serverUrl || getSharedEndpoint(),
       checkOnResume: config.checkOnResume ?? true,
       mandatoryInstallMode: config.mandatoryInstallMode || 'immediate',
       minimumBackgroundDuration: config.minimumBackgroundDuration ?? 0,
@@ -298,6 +299,13 @@ export class SankofaDeploy {
           }
           await this.storage.setCrashCount(0);
 
+          // Clear the native-side OTA bundle so the app loads
+          // the original embedded bundle on next launch.
+          try {
+            SankofaNativeModule.deployClearBundle();
+          } catch {}
+
+
           // Report rollback (fire-and-forget)
           this._reportEvent('rollback', {
             updateAvailable: false,
@@ -353,32 +361,32 @@ export class SankofaDeploy {
   }
 
   private async _downloadBundle(update: UpdateCheckResult): Promise<boolean> {
-    if (!update.downloadUrl) return false;
+    if (!update.downloadUrl || !update.sha256) return false;
 
-    // TODO: Implement native bridge call to:
-    // 1. Download the gzipped bundle to a temp file
-    // 2. Decompress it
-    // 3. Verify SHA256 matches update.sha256
-    // 4. Atomically move to the bundle load path
-    //
-    // For now, this is a placeholder that succeeds. The native bridges
-    // (SankofaDeployBridge.swift / SankofaDeployBridge.kt) will
-    // implement the actual file operations.
     try {
-      // Placeholder: the native module will handle the actual download
-      console.log(`[SankofaDeploy] Would download bundle from ${update.downloadUrl}`);
+      // Call the native bridge to download, decompress, and SHA256-verify
+      const localPath: string = await SankofaNativeModule.deployDownloadBundle(
+        update.downloadUrl,
+        update.sha256,
+      );
+      console.log(`[SankofaDeploy] Bundle downloaded to ${localPath}`);
       return true;
-    } catch (err) {
-      console.error('[SankofaDeploy] Bundle download failed:', err);
+    } catch (err: any) {
+      console.error(`[SankofaDeploy] Bundle download failed: ${err.message ?? err}`);
       return false;
     }
   }
 
   private _reloadApp(): void {
-    // TODO: Implement native bridge call to reload the JS bundle.
-    // Expo: Updates.reloadAsync()
-    // Bare RN: DevSettings.reload() or RCTBridge.reload()
-    console.log('[SankofaDeploy] Would reload app with new bundle');
+    // Call the native bridge to reload the JS bundle from the
+    // newly-downloaded OTA path. Uses Expo Updates if available,
+    // otherwise falls back to activity recreation (Android) or
+    // RCTBridge reload notification (iOS).
+    try {
+      SankofaNativeModule.deployReload();
+    } catch (err) {
+      console.error('[SankofaDeploy] Reload failed:', err);
+    }
   }
 
   private _reportEvent(
