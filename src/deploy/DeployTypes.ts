@@ -10,6 +10,10 @@ export interface DeployConfig {
   apiKey?: string;
   /** Sankofa API endpoint. Defaults to the main Sankofa endpoint. */
   serverUrl?: string;
+  /** Native binary version override. Defaults to the native app version. */
+  appVersion?: string;
+  /** Stable rollout identity override. Defaults to Sankofa/native deploy identity. */
+  distinctId?: string;
   /** Check for updates when the app resumes from background. Default: true. */
   checkOnResume?: boolean;
   /** How to handle mandatory updates. Default: 'immediate'. */

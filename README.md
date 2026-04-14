@@ -75,6 +75,81 @@ This package follows standard React Native autolinking.
 - **iOS**: Uses CocoaPods. Run `pod install` in your `ios/` directory (or `npx expo run:ios`).
 - **Android**: Uses Gradle. Dependencies are resolved automatically via Maven Central.
 
+## Sankofa Deploy
+
+Deploy checks for OTA JavaScript updates with the same `sk_live_` / `sk_test_` SDK key used by analytics. Publishing releases uses a separate Deploy Token in the CLI.
+
+```tsx
+import { Sankofa, SankofaDeploy } from 'sankofa-react-native';
+
+Sankofa.initialize('sk_live_...', {
+  endpoint: 'https://api.sankofa.dev',
+});
+
+const deploy = new SankofaDeploy();
+
+deploy.checkForUpdate().then((update) => {
+  if (update.updateAvailable) {
+    deploy.downloadAndApply(update);
+  }
+});
+```
+
+Optional test overrides:
+
+```tsx
+const deploy = new SankofaDeploy({
+  appVersion: '1.4.2',
+  distinctId: 'device-or-user-id',
+});
+```
+
+### Expo Prebuild
+
+Add the config plugin, then run prebuild:
+
+```json
+{
+  "expo": {
+    "plugins": ["sankofa-react-native"]
+  }
+}
+```
+
+```bash
+npx expo prebuild
+```
+
+### Bare React Native
+
+Android release hosts should prefer the Sankofa bundle provider:
+
+```kotlin
+import dev.sankofa.rn.SankofaDeployBundleProvider
+
+override fun getJSBundleFile(): String? {
+  return SankofaDeployBundleProvider.getJSBundleFile(applicationContext)
+    ?: super.getJSBundleFile()
+}
+```
+
+iOS release hosts should prefer the Sankofa bundle URL before the embedded bundle:
+
+```swift
+import SankofaReactNative
+
+override func bundleURL() -> URL? {
+  #if DEBUG
+  return RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: "index")
+  #else
+  if let url = SankofaDeployBundleProvider.bundleURL() {
+    return url
+  }
+  return Bundle.main.url(forResource: "main", withExtension: "jsbundle")
+  #endif
+}
+```
+
 ---
 
 ## Local Development (Monorepo)

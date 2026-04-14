@@ -1,4 +1,72 @@
 import ExpoModulesCore
+import UIKit
+import CommonCrypto
+import zlib
+
+private let sankofaDeployBundlePathKey = "sankofa_deploy_bundle_path"
+private let sankofaDeployDistinctIdKey = "sankofa_deploy_distinct_id"
+
+private func sankofaDeploySanitizeFilePart(_ value: String) -> String {
+  let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+  let scalars = value.unicodeScalars.map { allowed.contains($0) ? Character($0) : Character("_") }
+  let result = String(scalars).prefix(96)
+  return result.isEmpty ? "bundle" : String(result)
+}
+
+private extension Data {
+  func sankofaDeployGunzipped() throws -> Data {
+    guard count > 2, self[0] == 0x1f, self[1] == 0x8b else {
+      return self
+    }
+
+    var stream = z_stream()
+    stream.next_in = UnsafeMutablePointer<Bytef>(
+      mutating: (self as NSData).bytes.bindMemory(to: Bytef.self, capacity: count)
+    )
+    stream.avail_in = uint(count)
+
+    let status = inflateInit2_(&stream, 47, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+    guard status == Z_OK else {
+      throw NSError(domain: "SankofaDeploy", code: Int(status), userInfo: [
+        NSLocalizedDescriptionKey: "inflateInit2 failed with status \(status)"
+      ])
+    }
+
+    var decompressed = Data(capacity: count * 2)
+    let bufferSize = 32768
+    let buffer = UnsafeMutablePointer<Bytef>.allocate(capacity: bufferSize)
+    defer {
+      inflateEnd(&stream)
+      buffer.deallocate()
+    }
+
+    var inflateStatus: Int32 = Z_OK
+    while inflateStatus != Z_STREAM_END {
+      stream.next_out = buffer
+      stream.avail_out = uint(bufferSize)
+      inflateStatus = inflate(&stream, Z_NO_FLUSH)
+      guard inflateStatus == Z_OK || inflateStatus == Z_STREAM_END else {
+        throw NSError(domain: "SankofaDeploy", code: Int(inflateStatus), userInfo: [
+          NSLocalizedDescriptionKey: "inflate failed with status \(inflateStatus)"
+        ])
+      }
+      let written = bufferSize - Int(stream.avail_out)
+      if written > 0 {
+        decompressed.append(buffer, count: written)
+      }
+    }
+
+    return decompressed
+  }
+
+  func sankofaDeploySHA256Hex() -> String {
+    var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+    withUnsafeBytes {
+      _ = CC_SHA256($0.baseAddress, CC_LONG(count), &hash)
+    }
+    return hash.map { String(format: "%02x", $0) }.joined()
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SankofaModule.swift
@@ -93,7 +161,7 @@ public class SankofaModule: Module {
 
     // Downloads a gzipped JS bundle, decompresses, verifies SHA256,
     // saves to the app's Documents directory. Returns the local path.
-    AsyncFunction("deployDownloadBundle") { (url: String, expectedSha256: String, promise: Promise) in
+    AsyncFunction("deployDownloadBundle") { (url: String, expectedSha256: String, label: String, promise: Promise) in
       DispatchQueue.global(qos: .userInitiated).async {
         do {
           guard let downloadUrl = URL(string: url) else {
@@ -107,27 +175,26 @@ public class SankofaModule: Module {
           try? fm.createDirectory(at: deployDir, withIntermediateDirectories: true)
 
           let tempFile = deployDir.appendingPathComponent("bundle_temp.jsbundle.gz")
-          let finalFile = deployDir.appendingPathComponent("bundle.jsbundle")
+          let finalFile = deployDir.appendingPathComponent(
+            "\(sankofaDeploySanitizeFilePart(label))_\(String(expectedSha256.prefix(12))).jsbundle"
+          )
 
           // 1. Download
           let data = try Data(contentsOf: downloadUrl)
           try data.write(to: tempFile)
 
           // 2. Decompress gzip
-          let decompressed = try Data(contentsOf: tempFile).gunzipped()
+          let decompressed = try Data(contentsOf: tempFile).sankofaDeployGunzipped()
           try decompressed.write(to: finalFile)
           try? fm.removeItem(at: tempFile)
 
           // 3. Verify SHA256
-          let hash = decompressed.sha256Hex()
+          let hash = decompressed.sankofaDeploySHA256Hex()
           guard hash == expectedSha256 else {
             try? fm.removeItem(at: finalFile)
             promise.reject("ERR_HASH_MISMATCH", "SHA256 mismatch: expected=\(expectedSha256) actual=\(hash)")
             return
           }
-
-          // 4. Persist the bundle path
-          UserDefaults.standard.set(finalFile.path, forKey: "sankofa_deploy_bundle_path")
 
           promise.resolve(finalFile.path)
         } catch {
@@ -138,19 +205,29 @@ public class SankofaModule: Module {
 
     // Returns the path of the installed OTA bundle, or nil.
     Function("deployGetBundlePath") { () -> String? in
-      guard let path = UserDefaults.standard.string(forKey: "sankofa_deploy_bundle_path"),
+      guard let path = UserDefaults.standard.string(forKey: sankofaDeployBundlePathKey),
             FileManager.default.fileExists(atPath: path) else {
         return nil
       }
       return path
     }
 
+    // Marks a verified bundle as active for the native bundle loader.
+    Function("deploySetBundlePath") { (path: String) in
+      guard FileManager.default.fileExists(atPath: path) else {
+        throw NSError(domain: "SankofaDeploy", code: 404, userInfo: [
+          NSLocalizedDescriptionKey: "Bundle file does not exist: \(path)"
+        ])
+      }
+      UserDefaults.standard.set(path, forKey: sankofaDeployBundlePathKey)
+    }
+
     // Deletes the OTA bundle and resets to the embedded bundle.
     Function("deployClearBundle") {
-      if let path = UserDefaults.standard.string(forKey: "sankofa_deploy_bundle_path") {
+      if let path = UserDefaults.standard.string(forKey: sankofaDeployBundlePathKey) {
         try? FileManager.default.removeItem(atPath: path)
       }
-      UserDefaults.standard.removeObject(forKey: "sankofa_deploy_bundle_path")
+      UserDefaults.standard.removeObject(forKey: sankofaDeployBundlePathKey)
     }
 
     // Triggers a JS bundle reload.
@@ -165,6 +242,51 @@ public class SankofaModule: Module {
         // Fallback: RCTBridge reload
         NotificationCenter.default.post(name: NSNotification.Name("RCTBridgeWillReloadNotification"), object: nil)
       }
+    }
+
+    // MARK: - Deploy metadata and persistent storage
+
+    Function("deployGetAppVersion") { () -> String in
+      Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+    }
+
+    Function("deployGetDistinctId") { () -> String in
+      let defaults = UserDefaults.standard
+      if let identified = defaults.string(forKey: "dev.sankofa.distinct_id"), !identified.isEmpty {
+        return identified
+      }
+      if let anonymous = defaults.string(forKey: "dev.sankofa.anonymous_id"), !anonymous.isEmpty {
+        return anonymous
+      }
+      if let existing = defaults.string(forKey: sankofaDeployDistinctIdKey), !existing.isEmpty {
+        return existing
+      }
+      let generated = "deploy_\(UUID().uuidString)"
+      defaults.set(generated, forKey: sankofaDeployDistinctIdKey)
+      return generated
+    }
+
+    Function("deployGetDeviceInfo") { () -> [String: String] in
+      [
+        "osVersion": UIDevice.current.systemVersion,
+        "deviceModel": UIDevice.current.model
+      ]
+    }
+
+    Function("deployStorageGet") { (key: String) -> String? in
+      UserDefaults.standard.string(forKey: key)
+    }
+
+    Function("deployStorageSet") { (key: String, value: String) in
+      UserDefaults.standard.set(value, forKey: key)
+    }
+
+    Function("deployStorageRemove") { (key: String) in
+      UserDefaults.standard.removeObject(forKey: key)
+    }
+
+    Function("deployStorageMultiRemove") { (keys: [String]) in
+      keys.forEach { UserDefaults.standard.removeObject(forKey: $0) }
     }
   }
 }

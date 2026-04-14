@@ -25,6 +25,7 @@ export interface HandshakeModules {
     size?: number;
     is_mandatory?: boolean;
     release_id?: string;
+    reason?: string;
   };
   replay?: {
     enabled: boolean;

@@ -1,26 +1,44 @@
 import type { DeployStatus } from './DeployTypes';
+import SankofaNativeModule from '../SankofaModule';
 
-// Use a simple in-memory + JSON store approach that doesn't require
-// @react-native-async-storage as a peer dependency. In a production
-// build, the native bridge (SankofaDeployBridge) will handle persistent
-// storage via SharedPreferences (Android) / UserDefaults (iOS).
-// This JS-layer cache survives the JS lifecycle but is seeded from
-// the native side on construction.
 const memoryStore = new Map<string, string>();
 
-// Minimal Storage-compatible interface backed by the in-memory
-// map. The native bridge overrides these with real persistence.
+// Native persistence uses SharedPreferences/UserDefaults. The in-memory
+// fallback keeps tests and unsupported native hosts functional.
 const Storage = {
   getItem: async (key: string): Promise<string | null> => {
+    try {
+      if (typeof SankofaNativeModule.deployStorageGet === 'function') {
+        return await SankofaNativeModule.deployStorageGet(key);
+      }
+    } catch {}
     return memoryStore.get(key) ?? null;
   },
   setItem: async (key: string, value: string): Promise<void> => {
+    try {
+      if (typeof SankofaNativeModule.deployStorageSet === 'function') {
+        await SankofaNativeModule.deployStorageSet(key, value);
+        return;
+      }
+    } catch {}
     memoryStore.set(key, value);
   },
   removeItem: async (key: string): Promise<void> => {
+    try {
+      if (typeof SankofaNativeModule.deployStorageRemove === 'function') {
+        await SankofaNativeModule.deployStorageRemove(key);
+        return;
+      }
+    } catch {}
     memoryStore.delete(key);
   },
   multiRemove: async (keys: string[]): Promise<void> => {
+    try {
+      if (typeof SankofaNativeModule.deployStorageMultiRemove === 'function') {
+        await SankofaNativeModule.deployStorageMultiRemove(keys);
+        return;
+      }
+    } catch {}
     keys.forEach((k) => memoryStore.delete(k));
   },
 };
@@ -28,6 +46,7 @@ const Storage = {
 const KEYS = {
   CURRENT_LABEL: 'sankofa:deploy:current_label',
   PREVIOUS_LABEL: 'sankofa:deploy:previous_label',
+  CURRENT_BUNDLE_PATH: 'sankofa:deploy:current_bundle_path',
   PREVIOUS_BUNDLE_PATH: 'sankofa:deploy:previous_bundle_path',
   CRASH_COUNT: 'sankofa:deploy:crash_count',
   LAST_BOOT_TIME: 'sankofa:deploy:last_boot_time',
@@ -35,6 +54,8 @@ const KEYS = {
   ROLLED_BACK_LABEL: 'sankofa:deploy:rolled_back_label',
   LAST_CHECK_TIME: 'sankofa:deploy:last_check_time',
   PENDING_LABEL: 'sankofa:deploy:pending_label',
+  PENDING_BUNDLE_PATH: 'sankofa:deploy:pending_bundle_path',
+  DISTINCT_ID: 'sankofa:deploy:distinct_id',
 } as const;
 
 /**
@@ -67,6 +88,18 @@ export class DeployStorage {
 
   async setPreviousBundlePath(path: string): Promise<void> {
     await Storage.setItem(KEYS.PREVIOUS_BUNDLE_PATH, path);
+  }
+
+  async getCurrentBundlePath(): Promise<string | null> {
+    return Storage.getItem(KEYS.CURRENT_BUNDLE_PATH);
+  }
+
+  async setCurrentBundlePath(path: string | null): Promise<void> {
+    if (path === null) {
+      await Storage.removeItem(KEYS.CURRENT_BUNDLE_PATH);
+    } else {
+      await Storage.setItem(KEYS.CURRENT_BUNDLE_PATH, path);
+    }
   }
 
   async getCrashCount(): Promise<number> {
@@ -127,6 +160,26 @@ export class DeployStorage {
     } else {
       await Storage.setItem(KEYS.PENDING_LABEL, label);
     }
+  }
+
+  async getPendingBundlePath(): Promise<string | null> {
+    return Storage.getItem(KEYS.PENDING_BUNDLE_PATH);
+  }
+
+  async setPendingBundlePath(path: string | null): Promise<void> {
+    if (path === null) {
+      await Storage.removeItem(KEYS.PENDING_BUNDLE_PATH);
+    } else {
+      await Storage.setItem(KEYS.PENDING_BUNDLE_PATH, path);
+    }
+  }
+
+  async getDistinctId(): Promise<string | null> {
+    return Storage.getItem(KEYS.DISTINCT_ID);
+  }
+
+  async setDistinctId(distinctId: string): Promise<void> {
+    await Storage.setItem(KEYS.DISTINCT_ID, distinctId);
   }
 
   async getStatus(): Promise<DeployStatus> {

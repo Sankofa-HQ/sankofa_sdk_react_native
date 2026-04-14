@@ -1,5 +1,7 @@
 package dev.sankofa.rn
 
+import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import expo.modules.kotlin.modules.Module
@@ -11,6 +13,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.URL
 import java.security.MessageDigest
+import java.util.UUID
 import java.util.zip.GZIPInputStream
 
 /**
@@ -24,6 +27,20 @@ import java.util.zip.GZIPInputStream
 class SankofaModule : Module() {
 
   private val mainHandler = Handler(Looper.getMainLooper())
+
+  private fun deployPrefs(ctx: Context) =
+    ctx.getSharedPreferences("sankofa_deploy", Context.MODE_PRIVATE)
+
+  private fun requireApplicationContext(): Context? =
+    appContext.reactContext?.applicationContext
+
+  private fun sanitizeFilePart(value: String): String =
+    value.replace(Regex("[^A-Za-z0-9._-]"), "_").take(96).ifBlank { "bundle" }
+
+  private fun isGzip(file: File): Boolean =
+    file.inputStream().use { input ->
+      input.read() == 0x1f && input.read() == 0x8b
+    }
 
   private inline fun runOnMain(crossinline block: () -> Unit) {
     if (Looper.myLooper() == Looper.getMainLooper()) block()
@@ -111,10 +128,10 @@ class SankofaModule : Module() {
     // Downloads a gzipped JS bundle from the given URL, decompresses it,
     // verifies the SHA256 hash, and saves it to the app's internal
     // storage. Returns the local file path on success.
-    AsyncFunction("deployDownloadBundle") { url: String, expectedSha256: String, promise: Promise ->
+    AsyncFunction("deployDownloadBundle") { url: String, expectedSha256: String, label: String, promise: Promise ->
       Thread {
         try {
-          val ctx = appContext.reactContext?.applicationContext
+          val ctx = requireApplicationContext()
           if (ctx == null) {
             promise.reject("ERR_NO_CONTEXT", "Application context unavailable", null)
             return@Thread
@@ -123,7 +140,7 @@ class SankofaModule : Module() {
           val deployDir = File(ctx.filesDir, "sankofa_deploy")
           deployDir.mkdirs()
           val tempFile = File(deployDir, "bundle_temp.jsbundle.gz")
-          val finalFile = File(deployDir, "bundle.jsbundle")
+          val finalFile = File(deployDir, "${sanitizeFilePart(label)}_${expectedSha256.take(12)}.jsbundle")
 
           // 1. Download to temp file
           val connection = URL(url).openConnection()
@@ -135,10 +152,19 @@ class SankofaModule : Module() {
             }
           }
 
-          // 2. Decompress gzip → final file
-          GZIPInputStream(tempFile.inputStream()).use { gzipIn ->
-            FileOutputStream(finalFile).use { output ->
-              gzipIn.copyTo(output)
+          // 2. Decompress gzip if needed → final file. Some HTTP stacks
+          // transparently decode Content-Encoding, so plain JS is valid here.
+          if (isGzip(tempFile)) {
+            GZIPInputStream(tempFile.inputStream()).use { gzipIn ->
+              FileOutputStream(finalFile).use { output ->
+                gzipIn.copyTo(output)
+              }
+            }
+          } else {
+            tempFile.inputStream().use { input ->
+              FileOutputStream(finalFile).use { output ->
+                input.copyTo(output)
+              }
             }
           }
           tempFile.delete()
@@ -160,12 +186,6 @@ class SankofaModule : Module() {
             return@Thread
           }
 
-          // 4. Save the path for the bundle loader to pick up on next reload
-          ctx.getSharedPreferences("sankofa_deploy", 0)
-            .edit()
-            .putString("bundle_path", finalFile.absolutePath)
-            .apply()
-
           promise.resolve(finalFile.absolutePath)
         } catch (e: Exception) {
           promise.reject("ERR_DOWNLOAD", "Bundle download failed: ${e.message}", e)
@@ -177,18 +197,29 @@ class SankofaModule : Module() {
     // Returns the path of the currently-installed OTA bundle, or null
     // if no OTA bundle has been applied (app uses the embedded bundle).
     Function("deployGetBundlePath") {
-      val ctx = appContext.reactContext?.applicationContext ?: return@Function null
-      val path = ctx.getSharedPreferences("sankofa_deploy", 0)
+      val ctx = requireApplicationContext() ?: return@Function null
+      val path = deployPrefs(ctx)
         .getString("bundle_path", null)
       if (path != null && File(path).exists()) path else null
+    }
+
+    // ── deploySetBundlePath ────────────────────────────────────────────
+    // Marks a verified bundle as active for the native host bundle loader.
+    Function("deploySetBundlePath") { path: String ->
+      val ctx = requireApplicationContext() ?: return@Function null
+      val file = File(path)
+      if (!file.exists()) {
+        throw IllegalArgumentException("Bundle file does not exist: $path")
+      }
+      deployPrefs(ctx).edit().putString("bundle_path", file.absolutePath).apply()
     }
 
     // ── deployClearBundle ────────────────────────────────────────────────
     // Deletes the OTA bundle and resets to the embedded bundle.
     // Used by the auto-rollback state machine.
     Function("deployClearBundle") {
-      val ctx = appContext.reactContext?.applicationContext ?: return@Function
-      val prefs = ctx.getSharedPreferences("sankofa_deploy", 0)
+      val ctx = requireApplicationContext() ?: return@Function null
+      val prefs = deployPrefs(ctx)
       val path = prefs.getString("bundle_path", null)
       if (path != null) {
         File(path).delete()
@@ -210,18 +241,65 @@ class SankofaModule : Module() {
         } catch (e: Exception) {
           // Fallback: DevSettings reload
           try {
-            val devSettings = Class.forName("com.facebook.react.devsupport.DevInternalSettings")
-            val reactContext = appContext.reactContext
-            if (reactContext is com.facebook.react.bridge.ReactContext) {
-              val catalyst = reactContext.catalystInstance
-              catalyst?.javaClass?.getMethod("loadScriptFromFile", String::class.java, String::class.java, Boolean::class.java)
-            }
+            appContext.currentActivity?.recreate()
           } catch (_: Exception) {}
-          // Ultimate fallback: recreate the activity
-          val activity = appContext.currentActivity
-          activity?.recreate()
         }
       }
+    }
+
+    // ── deploy native metadata and persistent storage ───────────────────
+    Function("deployGetAppVersion") {
+      val ctx = requireApplicationContext() ?: return@Function "1.0.0"
+      @Suppress("DEPRECATION")
+      val info = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+      info.versionName ?: "1.0.0"
+    }
+
+    Function("deployGetDistinctId") {
+      val ctx = requireApplicationContext() ?: return@Function null
+      val identityPrefs = ctx.getSharedPreferences("sankofa_identity", Context.MODE_PRIVATE)
+      val identified = identityPrefs.getString("sankofa_user_id", null)
+      if (!identified.isNullOrBlank()) return@Function identified
+      val anonymous = identityPrefs.getString("sankofa_anon_id", null)
+      if (!anonymous.isNullOrBlank()) return@Function anonymous
+
+      val prefs = deployPrefs(ctx)
+      val existing = prefs.getString("deploy_distinct_id", null)
+      if (!existing.isNullOrBlank()) return@Function existing
+      val generated = "deploy_${UUID.randomUUID()}"
+      prefs.edit().putString("deploy_distinct_id", generated).apply()
+      generated
+    }
+
+    Function("deployGetDeviceInfo") {
+      mapOf(
+        "osVersion" to Build.VERSION.RELEASE,
+        "deviceModel" to listOf(Build.MANUFACTURER, Build.MODEL)
+          .filter { it.isNotBlank() }
+          .joinToString(" ")
+      )
+    }
+
+    Function("deployStorageGet") { key: String ->
+      val ctx = requireApplicationContext() ?: return@Function null
+      deployPrefs(ctx).getString(key, null)
+    }
+
+    Function("deployStorageSet") { key: String, value: String ->
+      val ctx = requireApplicationContext() ?: return@Function null
+      deployPrefs(ctx).edit().putString(key, value).apply()
+    }
+
+    Function("deployStorageRemove") { key: String ->
+      val ctx = requireApplicationContext() ?: return@Function null
+      deployPrefs(ctx).edit().remove(key).apply()
+    }
+
+    Function("deployStorageMultiRemove") { keys: List<String> ->
+      val ctx = requireApplicationContext() ?: return@Function null
+      val edit = deployPrefs(ctx).edit()
+      keys.forEach { edit.remove(it) }
+      edit.apply()
     }
   }
 }

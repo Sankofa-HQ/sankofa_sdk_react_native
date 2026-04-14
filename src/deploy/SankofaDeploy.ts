@@ -1,7 +1,7 @@
 import { AppState, Platform } from 'react-native';
 import SankofaNativeModule from '../SankofaModule';
 import { DeployStorage } from './DeployStorage';
-import { waitForHandshake, getHandshakeModules, getSharedApiKey, getSharedEndpoint } from '../index';
+import { getSharedApiKey, getSharedEndpoint } from '../index';
 import type {
   DeployConfig,
   UpdateCheckResult,
@@ -42,11 +42,19 @@ const HEALTH_CONFIRM_MS = 10_000; // 10 seconds after boot
  * ```
  */
 export class SankofaDeploy {
-  private config: Required<DeployConfig>;
+  private config: DeployConfig & {
+    apiKey: string;
+    serverUrl: string;
+    checkOnResume: boolean;
+    mandatoryInstallMode: 'immediate' | 'on_next_restart';
+    minimumBackgroundDuration: number;
+  };
   private storage: DeployStorage;
   private healthTimer: ReturnType<typeof setTimeout> | null = null;
   private appStateSubscription: any = null;
   private lastBackgroundTime: number = 0;
+  private appVersionPromise: Promise<string> | null = null;
+  private distinctIdPromise: Promise<string> | null = null;
 
   constructor(config: DeployConfig = {}) {
     this.config = {
@@ -55,11 +63,13 @@ export class SankofaDeploy {
       checkOnResume: config.checkOnResume ?? true,
       mandatoryInstallMode: config.mandatoryInstallMode || 'immediate',
       minimumBackgroundDuration: config.minimumBackgroundDuration ?? 0,
+      appVersion: config.appVersion,
+      distinctId: config.distinctId,
     };
     this.storage = new DeployStorage();
 
-    // Run the rollback check on construction (should be called early in app lifecycle)
-    this._runRollbackCheck();
+    // Prepare pending updates and rollback state early in app lifecycle.
+    this._prepareLaunchState();
 
     // Listen for app state changes (background/foreground)
     if (this.config.checkOnResume) {
@@ -80,36 +90,38 @@ export class SankofaDeploy {
    */
   async checkForUpdate(): Promise<UpdateCheckResult> {
     try {
-      const currentLabel = await this.storage.getCurrentLabel();
-      const rolledBackLabel = await this.storage.getRolledBackLabel();
+      const [currentLabel, rolledBackLabel, appVersion, distinctId] = await Promise.all([
+        this.storage.getCurrentLabel(),
+        this.storage.getRolledBackLabel(),
+        this._getAppVersion(),
+        this._getDistinctId(),
+      ]);
 
-      // 1. Try the shared handshake first — if Sankofa.initialize()
-      //    was called, the handshake is already in flight and we can
-      //    read the deploy module config without a second HTTP call.
+      const params = new URLSearchParams({
+        app_version: appVersion,
+        current_bundle_label: currentLabel || '',
+        distinct_id: distinctId,
+        platform: Platform.OS,
+      });
+
       let deployData: Record<string, any> | null = null;
 
-      const cached = getHandshakeModules();
-      if (cached?.deploy) {
-        deployData = cached.deploy as Record<string, any>;
-      } else {
-        // Wait for the handshake if it's still in flight
-        const modules = await waitForHandshake();
-        if (modules?.deploy) {
-          deployData = modules.deploy as Record<string, any>;
-        }
-      }
-
-      // 2. Fallback: if handshake didn't include deploy data (e.g.
-      //    Sankofa.initialize() wasn't called, or server is old),
-      //    call the standalone deploy check endpoint.
-      if (!deployData) {
-        const params = new URLSearchParams({
-          app_version: this._getAppVersion(),
-          current_bundle_label: currentLabel || '',
-          distinct_id: this._getDistinctId(),
-          platform: Platform.OS,
+      // Prefer the unified handshake with deploy params. The cached
+      // handshake from Sankofa.initialize() may not have these params,
+      // so it is treated as module state only and never suppresses
+      // this update check.
+      try {
+        const res = await fetch(`${this.config.serverUrl}/api/v1/handshake?${params}`, {
+          headers: { 'x-api-key': this.config.apiKey },
         });
+        if (res.ok) {
+          const data = await res.json();
+          deployData = (data.modules?.deploy as Record<string, any>) ?? null;
+        }
+      } catch {}
 
+      // Fallback for older servers.
+      if (!deployData) {
         const res = await fetch(
           `${this.config.serverUrl}/api/deploy/check?${params}`,
           { headers: { 'x-api-key': this.config.apiKey } },
@@ -162,36 +174,38 @@ export class SankofaDeploy {
     try {
       this._reportEvent('download_start', update);
 
-      // Save current bundle as previous (for rollback)
-      const currentLabel = await this.storage.getCurrentLabel();
-      if (currentLabel) {
-        await this.storage.setPreviousLabel(currentLabel);
-      }
-
-      // Download the bundle
-      // In a production implementation, this would use the native
-      // bridge to download to the app's file system, verify SHA256,
-      // and write to the bundle load path. For now we use a
-      // placeholder that the native bridge will implement.
-      const success = await this._downloadBundle(update);
-      if (!success) {
+      const localPath = await this._downloadBundle(update);
+      if (!localPath) {
         this._reportEvent('apply_fail', update);
         return;
       }
 
       this._reportEvent('download_complete', update);
 
-      // Update state
+      const currentLabel = await this.storage.getCurrentLabel();
+      const currentBundlePath =
+        await this.storage.getCurrentBundlePath() ||
+        await this._getNativeBundlePath();
+
+      if (currentLabel) {
+        await this.storage.setPreviousLabel(currentLabel);
+      }
+      if (currentBundlePath) {
+        await this.storage.setPreviousBundlePath(currentBundlePath);
+      }
+
+      await this._setNativeBundlePath(localPath);
+      await this.storage.setCurrentBundlePath(localPath);
       await this.storage.setCurrentLabel(update.label);
       await this.storage.setCrashCount(0);
       await this.storage.setBootConfirmed(false);
+      await this.storage.setLastBootTime(0);
       await this.storage.setRolledBackLabel(null);
+      await this.storage.setPendingLabel(null);
+      await this.storage.setPendingBundlePath(null);
 
       this._reportEvent('apply_success', update);
 
-      // Reload the app with the new bundle
-      // The native bridge handles this — it tells RN to reload from
-      // the new bundle path.
       this._reloadApp();
     } catch (err) {
       console.error('[SankofaDeploy] Download/apply failed:', err);
@@ -211,14 +225,15 @@ export class SankofaDeploy {
     try {
       this._reportEvent('download_start', update);
 
-      const success = await this._downloadBundle(update);
-      if (!success) {
+      const localPath = await this._downloadBundle(update);
+      if (!localPath) {
         this._reportEvent('apply_fail', update);
         return;
       }
 
       this._reportEvent('download_complete', update);
       await this.storage.setPendingLabel(update.label);
+      await this.storage.setPendingBundlePath(localPath);
     } catch (err) {
       console.warn('[SankofaDeploy] Background download failed:', err);
     }
@@ -257,6 +272,55 @@ export class SankofaDeploy {
 
   // ── Private methods ─────────────────────────────────────────────────
 
+  private async _prepareLaunchState(): Promise<void> {
+    const promoted = await this._promotePendingBundle();
+    if (!promoted) {
+      await this._runRollbackCheck();
+    }
+  }
+
+  private async _promotePendingBundle(): Promise<boolean> {
+    const [pendingLabel, pendingBundlePath] = await Promise.all([
+      this.storage.getPendingLabel(),
+      this.storage.getPendingBundlePath(),
+    ]);
+
+    if (!pendingLabel || !pendingBundlePath) {
+      return false;
+    }
+
+    try {
+      const currentLabel = await this.storage.getCurrentLabel();
+      const currentBundlePath =
+        await this.storage.getCurrentBundlePath() ||
+        await this._getNativeBundlePath();
+
+      if (currentLabel) {
+        await this.storage.setPreviousLabel(currentLabel);
+      }
+      if (currentBundlePath) {
+        await this.storage.setPreviousBundlePath(currentBundlePath);
+      }
+
+      await this._setNativeBundlePath(pendingBundlePath);
+      await this.storage.setCurrentBundlePath(pendingBundlePath);
+      await this.storage.setCurrentLabel(pendingLabel);
+      await this.storage.setPendingLabel(null);
+      await this.storage.setPendingBundlePath(null);
+      await this.storage.setCrashCount(0);
+      await this.storage.setBootConfirmed(false);
+      await this.storage.setLastBootTime(0);
+      await this.storage.setRolledBackLabel(null);
+      this._reloadApp();
+      return true;
+    } catch (err) {
+      console.warn('[SankofaDeploy] Pending bundle promotion failed:', err);
+      await this.storage.setPendingLabel(null);
+      await this.storage.setPendingBundlePath(null);
+      return false;
+    }
+  }
+
   /**
    * The auto-rollback state machine. Runs on construction (early in
    * the app lifecycle, ideally before heavy rendering).
@@ -283,6 +347,7 @@ export class SankofaDeploy {
           // ROLLBACK
           const currentLabel = await this.storage.getCurrentLabel();
           const previousLabel = await this.storage.getPreviousLabel();
+          const previousBundlePath = await this.storage.getPreviousBundlePath();
 
           console.warn(
             `[SankofaDeploy] Rolling back from ${currentLabel} to ${previousLabel || 'original bundle'} after ${crashCount} consecutive crashes`,
@@ -291,20 +356,19 @@ export class SankofaDeploy {
           if (currentLabel) {
             await this.storage.setRolledBackLabel(currentLabel);
           }
-          if (previousLabel) {
+          if (previousLabel && previousBundlePath) {
+            await this._setNativeBundlePath(previousBundlePath);
+            await this.storage.setCurrentBundlePath(previousBundlePath);
             await this.storage.setCurrentLabel(previousLabel);
           } else {
             // No previous label = revert to original embedded bundle
             await this.storage.setCurrentLabel('');
+            await this.storage.setCurrentBundlePath(null);
+            try {
+              SankofaNativeModule.deployClearBundle();
+            } catch {}
           }
           await this.storage.setCrashCount(0);
-
-          // Clear the native-side OTA bundle so the app loads
-          // the original embedded bundle on next launch.
-          try {
-            SankofaNativeModule.deployClearBundle();
-          } catch {}
-
 
           // Report rollback (fire-and-forget)
           this._reportEvent('rollback', {
@@ -339,9 +403,6 @@ export class SankofaDeploy {
     }
     await this.storage.setBootConfirmed(true);
     await this.storage.setCrashCount(0);
-    // Clear the rolled-back label — the app is healthy, future
-    // patches with any label are safe to try again.
-    await this.storage.setRolledBackLabel(null);
   }
 
   private _handleAppStateChange(nextState: string): void {
@@ -360,21 +421,39 @@ export class SankofaDeploy {
     }
   }
 
-  private async _downloadBundle(update: UpdateCheckResult): Promise<boolean> {
-    if (!update.downloadUrl || !update.sha256) return false;
+  private async _downloadBundle(update: UpdateCheckResult): Promise<string | null> {
+    if (!update.downloadUrl || !update.sha256) return null;
 
     try {
       // Call the native bridge to download, decompress, and SHA256-verify
       const localPath: string = await SankofaNativeModule.deployDownloadBundle(
         update.downloadUrl,
         update.sha256,
+        update.label || update.releaseId || '',
       );
       console.log(`[SankofaDeploy] Bundle downloaded to ${localPath}`);
-      return true;
+      return localPath;
     } catch (err: any) {
       console.error(`[SankofaDeploy] Bundle download failed: ${err.message ?? err}`);
-      return false;
+      return null;
     }
+  }
+
+  private async _getNativeBundlePath(): Promise<string | null> {
+    try {
+      if (typeof SankofaNativeModule.deployGetBundlePath === 'function') {
+        return await SankofaNativeModule.deployGetBundlePath();
+      }
+    } catch {}
+    return null;
+  }
+
+  private async _setNativeBundlePath(path: string): Promise<void> {
+    if (typeof SankofaNativeModule.deploySetBundlePath === 'function') {
+      await SankofaNativeModule.deploySetBundlePath(path);
+      return;
+    }
+    throw new Error('Native Deploy bundle loader is not available');
   }
 
   private _reloadApp(): void {
@@ -394,44 +473,95 @@ export class SankofaDeploy {
     update: Partial<UpdateCheckResult>,
   ): void {
     // Fire-and-forget report to the server
-    try {
-      fetch(`${this.config.serverUrl}/api/deploy/report`, {
-        method: 'POST',
-        headers: {
-          'x-api-key': this.config.apiKey,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          events: [
-            {
-              event_type: eventType,
-              release_id: update.releaseId || '',
-              distinct_id: this._getDistinctId(),
-              app_version: this._getAppVersion(),
-              bundle_label: update.label || '',
-              platform: Platform.OS,
-              os_version: Platform.Version?.toString() || '',
-              device_model: '',
-            },
-          ],
-        }),
-      }).catch(() => {
-        // Silent fail — offline reports are acceptable
-      });
-    } catch {
-      // Never throw from event reporting
+    void (async () => {
+      try {
+        const [distinctId, appVersion, deviceInfo] = await Promise.all([
+          this._getDistinctId(),
+          this._getAppVersion(),
+          this._getDeviceInfo(),
+        ]);
+
+        fetch(`${this.config.serverUrl}/api/deploy/report`, {
+          method: 'POST',
+          headers: {
+            'x-api-key': this.config.apiKey,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            events: [
+              {
+                event_type: eventType,
+                release_id: update.releaseId || '',
+                distinct_id: distinctId,
+                app_version: appVersion,
+                bundle_label: update.label || '',
+                platform: Platform.OS,
+                os_version: deviceInfo.osVersion || Platform.Version?.toString() || '',
+                device_model: deviceInfo.deviceModel || '',
+              },
+            ],
+          }),
+        }).catch(() => {
+          // Silent fail — offline reports are acceptable
+        });
+      } catch {
+        // Never throw from event reporting
+      }
+    })();
+  }
+
+  private _getAppVersion(): Promise<string> {
+    if (this.config.appVersion) {
+      return Promise.resolve(this.config.appVersion);
     }
+    if (!this.appVersionPromise) {
+      this.appVersionPromise = (async () => {
+        try {
+          if (typeof SankofaNativeModule.deployGetAppVersion === 'function') {
+            const version = await SankofaNativeModule.deployGetAppVersion();
+            if (version) return version;
+          }
+        } catch {}
+        return '1.0.0';
+      })();
+    }
+    return this.appVersionPromise;
   }
 
-  private _getAppVersion(): string {
-    // TODO: Read from the native module or app.json.
-    // For now, return a placeholder.
-    return '1.0.0';
+  private _getDistinctId(): Promise<string> {
+    if (this.config.distinctId) {
+      return Promise.resolve(this.config.distinctId);
+    }
+    if (!this.distinctIdPromise) {
+      this.distinctIdPromise = (async () => {
+        try {
+          if (typeof SankofaNativeModule.deployGetDistinctId === 'function') {
+            const id = await SankofaNativeModule.deployGetDistinctId();
+            if (id) return id;
+          }
+        } catch {}
+
+        const existing = await this.storage.getDistinctId();
+        if (existing) return existing;
+
+        const id = `deploy_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+        await this.storage.setDistinctId(id);
+        return id;
+      })();
+    }
+    return this.distinctIdPromise;
   }
 
-  private _getDistinctId(): string {
-    // TODO: Read from Sankofa identity module if available,
-    // otherwise generate/persist a device-scoped UUID.
-    return 'device_' + Math.random().toString(36).slice(2, 10);
+  private async _getDeviceInfo(): Promise<{ osVersion?: string; deviceModel?: string }> {
+    try {
+      if (typeof SankofaNativeModule.deployGetDeviceInfo === 'function') {
+        const info = await SankofaNativeModule.deployGetDeviceInfo();
+        return {
+          osVersion: info?.osVersion || info?.os_version,
+          deviceModel: info?.deviceModel || info?.device_model,
+        };
+      }
+    } catch {}
+    return {};
   }
 }

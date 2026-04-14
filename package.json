@@ -9,7 +9,8 @@
     "ios",
     "android",
     "*.podspec",
-    "expo-module.config.json"
+    "expo-module.config.json",
+    "app.plugin.js"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
