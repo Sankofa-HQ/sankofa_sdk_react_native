@@ -33,7 +33,14 @@ export interface UpdateCheckResult {
   size?: number;
   isMandatory?: boolean;
   releaseId?: string;
-  reason?: string; // 'quota_exceeded', etc.
+  /**
+   * Server instructed the client to apply this update regardless of any
+   * client-side safety gates (rolled-back-same-label, etc.). Set when the
+   * server is pushing a kill-switch rollback to a device on a disabled
+   * release.
+   */
+  forceApply?: boolean;
+  reason?: string; // 'kill_switch_rollback', 'already_on_latest', 'not_in_rollout', etc.
 }
 
 /**

@@ -79,6 +79,10 @@ Pod::Spec.new do |s|
   # were introduced in GRDB 6.0.
   s.dependency 'GRDB.swift', '>= 6.0'
 
+  # SSZipArchive — battle-tested zip extractor used by Sankofa Deploy to unpack
+  # OTA archives (bundle.jsbundle + assets/) into the app's data container.
+  s.dependency 'SSZipArchive', '~> 2.4'
+
   # libz — required by Data+Gzip.swift for GZIP compression of replay chunks.
   s.library = 'z'
 

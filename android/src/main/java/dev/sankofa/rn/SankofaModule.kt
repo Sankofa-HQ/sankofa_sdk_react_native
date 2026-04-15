@@ -15,6 +15,8 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.zip.GZIPInputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
 
 /**
  * SankofaModule
@@ -125,9 +127,12 @@ class SankofaModule : Module() {
     // ═══════════════════════════════════════════════════════════════════════
 
     // ── deployDownloadBundle ────────────────────────────────────────────
-    // Downloads a gzipped JS bundle from the given URL, decompresses it,
-    // verifies the SHA256 hash, and saves it to the app's internal
-    // storage. Returns the local file path on success.
+    // Downloads an OTA archive (zip of bundle.jsbundle + assets/), verifies
+    // SHA256 against the downloaded bytes, unzips into a per-release
+    // directory, and returns the absolute path to bundle.jsbundle inside it.
+    // RN's AssetSourceResolver resolves `assets/...` relative to the bundle
+    // URL's directory, so fonts/images load correctly without custom asset
+    // wiring.
     AsyncFunction("deployDownloadBundle") { url: String, expectedSha256: String, label: String, promise: Promise ->
       Thread {
         try {
@@ -137,41 +142,25 @@ class SankofaModule : Module() {
             return@Thread
           }
 
-          val deployDir = File(ctx.filesDir, "sankofa_deploy")
-          deployDir.mkdirs()
-          val tempFile = File(deployDir, "bundle_temp.jsbundle.gz")
-          val finalFile = File(deployDir, "${sanitizeFilePart(label)}_${expectedSha256.take(12)}.jsbundle")
+          val deployRoot = File(ctx.filesDir, "SankofaDeploy")
+          deployRoot.mkdirs()
+          val releaseDirName = "${sanitizeFilePart(label)}_${expectedSha256.take(12)}"
+          val releaseDir = File(deployRoot, releaseDirName)
+          val tempArchive = File(deployRoot, "$releaseDirName.download.zip")
 
-          // 1. Download to temp file
+          // 1. Download archive
           val connection = URL(url).openConnection()
           connection.connectTimeout = 30_000
           connection.readTimeout = 60_000
           connection.getInputStream().use { input ->
-            FileOutputStream(tempFile).use { output ->
+            FileOutputStream(tempArchive).use { output ->
               input.copyTo(output)
             }
           }
 
-          // 2. Decompress gzip if needed → final file. Some HTTP stacks
-          // transparently decode Content-Encoding, so plain JS is valid here.
-          if (isGzip(tempFile)) {
-            GZIPInputStream(tempFile.inputStream()).use { gzipIn ->
-              FileOutputStream(finalFile).use { output ->
-                gzipIn.copyTo(output)
-              }
-            }
-          } else {
-            tempFile.inputStream().use { input ->
-              FileOutputStream(finalFile).use { output ->
-                input.copyTo(output)
-              }
-            }
-          }
-          tempFile.delete()
-
-          // 3. Verify SHA256
+          // 2. Verify SHA256 of the downloaded bytes (matches CLI's hash)
           val digest = MessageDigest.getInstance("SHA-256")
-          finalFile.inputStream().use { input ->
+          tempArchive.inputStream().use { input ->
             val buffer = ByteArray(8192)
             var bytesRead: Int
             while (input.read(buffer).also { bytesRead = it } != -1) {
@@ -179,14 +168,49 @@ class SankofaModule : Module() {
             }
           }
           val actualHash = digest.digest().joinToString("") { "%02x".format(it) }
-
           if (actualHash != expectedSha256) {
-            finalFile.delete()
-            promise.reject("ERR_HASH_MISMATCH", "SHA256 mismatch: expected=$expectedSha256 actual=$actualHash", null)
+            tempArchive.delete()
+            promise.reject("ERR_HASH_MISMATCH", "Archive SHA256 mismatch: expected=$expectedSha256 actual=$actualHash", null)
             return@Thread
           }
 
-          promise.resolve(finalFile.absolutePath)
+          // 3. Unzip into a fresh release dir. Wipe any prior copy first so a
+          //    re-download can't pick up stale files.
+          if (releaseDir.exists()) {
+            releaseDir.deleteRecursively()
+          }
+          releaseDir.mkdirs()
+          val canonicalReleaseDir = releaseDir.canonicalPath
+          ZipInputStream(tempArchive.inputStream()).use { zip ->
+            var entry: ZipEntry? = zip.nextEntry
+            while (entry != null) {
+              val outFile = File(releaseDir, entry.name)
+              // Defend against zip-slip: refuse entries that resolve outside
+              // the release directory.
+              if (!outFile.canonicalPath.startsWith(canonicalReleaseDir + File.separator) &&
+                  outFile.canonicalPath != canonicalReleaseDir) {
+                throw SecurityException("Refusing zip-slip entry: ${entry.name}")
+              }
+              if (entry.isDirectory) {
+                outFile.mkdirs()
+              } else {
+                outFile.parentFile?.mkdirs()
+                FileOutputStream(outFile).use { output -> zip.copyTo(output) }
+              }
+              zip.closeEntry()
+              entry = zip.nextEntry
+            }
+          }
+          tempArchive.delete()
+
+          val bundleFile = File(releaseDir, "bundle.jsbundle")
+          if (!bundleFile.exists()) {
+            releaseDir.deleteRecursively()
+            promise.reject("ERR_BUNDLE_MISSING", "Archive did not contain bundle.jsbundle", null)
+            return@Thread
+          }
+
+          promise.resolve(bundleFile.absolutePath)
         } catch (e: Exception) {
           promise.reject("ERR_DOWNLOAD", "Bundle download failed: ${e.message}", e)
         }
@@ -222,7 +246,14 @@ class SankofaModule : Module() {
       val prefs = deployPrefs(ctx)
       val path = prefs.getString("bundle_path", null)
       if (path != null) {
-        File(path).delete()
+        // Delete the parent release dir (bundle + assets), not just the file.
+        val bundleFile = File(path)
+        val parent = bundleFile.parentFile
+        if (parent != null && parent.path.contains("/SankofaDeploy/")) {
+          parent.deleteRecursively()
+        } else {
+          bundleFile.delete()
+        }
       }
       prefs.edit().remove("bundle_path").apply()
     }
@@ -249,10 +280,10 @@ class SankofaModule : Module() {
 
     // ── deploy native metadata and persistent storage ───────────────────
     Function("deployGetAppVersion") {
-      val ctx = requireApplicationContext() ?: return@Function "1.0.0"
+      val ctx = requireApplicationContext() ?: return@Function ""
       @Suppress("DEPRECATION")
       val info = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
-      info.versionName ?: "1.0.0"
+      info.versionName ?: ""
     }
 
     Function("deployGetDistinctId") {

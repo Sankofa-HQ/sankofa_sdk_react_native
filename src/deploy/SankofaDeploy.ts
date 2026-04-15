@@ -55,6 +55,7 @@ export class SankofaDeploy {
   private lastBackgroundTime: number = 0;
   private appVersionPromise: Promise<string> | null = null;
   private distinctIdPromise: Promise<string> | null = null;
+  private fatalErrorHandled: boolean = false;
 
   constructor(config: DeployConfig = {}) {
     this.config = {
@@ -71,6 +72,11 @@ export class SankofaDeploy {
     // Prepare pending updates and rollback state early in app lifecycle.
     this._prepareLaunchState();
 
+    // Catch uncaught JS errors so an OTA bundle that crashes the runtime is
+    // reported and rolled back immediately, instead of relying on the user
+    // to reopen the app twice within 30s.
+    this._installGlobalErrorHandler();
+
     // Listen for app state changes (background/foreground)
     if (this.config.checkOnResume) {
       this.appStateSubscription = AppState.addEventListener(
@@ -78,6 +84,21 @@ export class SankofaDeploy {
         this._handleAppStateChange.bind(this),
       );
     }
+  }
+
+  /**
+   * Report a fatal error from the current JS bundle. If the app is running
+   * an OTA bundle, this immediately rolls back to the previous bundle and
+   * reports a `crash_on_update` event to the server. Call this from a
+   * React ErrorBoundary so uncaught render errors trigger rollback instead
+   * of sitting on an error screen while the health timer marks the boot
+   * "healthy" anyway.
+   */
+  reportError(err: unknown, opts: { fatal?: boolean } = {}): void {
+    const fatal = opts.fatal ?? true;
+    if (!fatal) return;
+    const error = err instanceof Error ? err : new Error(String(err));
+    void this._onFatalError(error);
   }
 
   /**
@@ -105,6 +126,7 @@ export class SankofaDeploy {
       });
 
       let deployData: Record<string, any> | null = null;
+      const failureReasons: string[] = [];
 
       // Prefer the unified handshake with deploy params. The cached
       // handshake from Sankofa.initialize() may not have these params,
@@ -117,20 +139,35 @@ export class SankofaDeploy {
         if (res.ok) {
           const data = await res.json();
           deployData = (data.modules?.deploy as Record<string, any>) ?? null;
+          if (!deployData) failureReasons.push(`handshake_missing_deploy_module`);
+        } else {
+          failureReasons.push(`handshake_http_${res.status}`);
         }
-      } catch {}
+      } catch (err: any) {
+        failureReasons.push(`handshake_network_error:${err?.message || 'unknown'}`);
+      }
 
       // Fallback for older servers.
       if (!deployData) {
-        const res = await fetch(
-          `${this.config.serverUrl}/api/deploy/check?${params}`,
-          { headers: { 'x-api-key': this.config.apiKey } },
-        );
+        try {
+          const res = await fetch(
+            `${this.config.serverUrl}/api/deploy/check?${params}`,
+            { headers: { 'x-api-key': this.config.apiKey } },
+          );
 
-        if (!res.ok) {
-          return { updateAvailable: false };
+          if (!res.ok) {
+            return {
+              updateAvailable: false,
+              reason: `check_failed_http_${res.status} (${failureReasons.join(' | ') || 'no_handshake_attempt'}) url=${this.config.serverUrl}`,
+            };
+          }
+          deployData = await res.json();
+        } catch (err: any) {
+          return {
+            updateAvailable: false,
+            reason: `check_network_error:${err?.message || 'unknown'} (${failureReasons.join(' | ')}) url=${this.config.serverUrl}`,
+          };
         }
-        deployData = await res.json();
       }
 
       await this.storage.setLastCheckTime(Date.now());
@@ -139,8 +176,14 @@ export class SankofaDeploy {
         return { updateAvailable: false, reason: deployData?.reason };
       }
 
-      // Skip if this is the same bundle we rolled back from
-      if (rolledBackLabel && deployData.label === rolledBackLabel) {
+      const forceApply = !!deployData.force_apply;
+
+      // Skip if this is the same bundle we rolled back from — UNLESS the
+      // server is force-applying (e.g. the operator flipped the kill switch
+      // on the release we're running and the server is pushing us back to
+      // the previous working build). Force-apply also overrides the
+      // rolled-back-same-label check.
+      if (!forceApply && rolledBackLabel && deployData.label === rolledBackLabel) {
         return { updateAvailable: false, reason: 'rolled_back_same_label' };
       }
 
@@ -150,12 +193,17 @@ export class SankofaDeploy {
         label: deployData.label,
         sha256: deployData.sha256,
         size: deployData.size,
-        isMandatory: deployData.is_mandatory,
+        isMandatory: !!deployData.is_mandatory || forceApply,
+        forceApply,
         releaseId: deployData.release_id,
+        reason: deployData.reason,
       };
-    } catch (err) {
+    } catch (err: any) {
       console.warn('[SankofaDeploy] Update check failed:', err);
-      return { updateAvailable: false };
+      return {
+        updateAvailable: false,
+        reason: `exception:${err?.message || String(err)}`,
+      };
     }
   }
 
@@ -222,6 +270,27 @@ export class SankofaDeploy {
       return;
     }
 
+    // Skip re-downloading when the same label is already staged as pending
+    // AND its bundle is still on disk. Protects against a loop where the
+    // previous reload never took effect — otherwise every launch would
+    // re-download the same patch endlessly.
+    try {
+      const [pendingLabel, pendingPath] = await Promise.all([
+        this.storage.getPendingLabel(),
+        this.storage.getPendingBundlePath(),
+      ]);
+      if (pendingLabel === update.label && pendingPath) {
+        const stillOnDisk = await this._getNativeBundlePath().catch(() => null);
+        // Don't rely only on `_getNativeBundlePath` (which may return the
+        // active, not pending, path). If the pending bundle's file exists,
+        // we're already staged and just waiting for the restart.
+        if (stillOnDisk !== null || pendingPath) {
+          console.log(`[SankofaDeploy] ${update.label} already staged as pending — skipping re-download.`);
+          return;
+        }
+      }
+    } catch {}
+
     try {
       this._reportEvent('download_start', update);
 
@@ -258,6 +327,24 @@ export class SankofaDeploy {
     return this.storage.getStatus();
   }
 
+  /**
+   * Promote a staged pending bundle RIGHT NOW and reload the JS runtime.
+   *
+   * `downloadInBackground` only stages the bundle (so the UI doesn't yank
+   * the screen out from under the user). Call this from a "Restart now"
+   * button after a download completes, or after the user confirms they're
+   * ready to apply the update. Returns false when there's nothing pending.
+   */
+  async applyPending(): Promise<boolean> {
+    const [pendingLabel, pendingBundlePath] = await Promise.all([
+      this.storage.getPendingLabel(),
+      this.storage.getPendingBundlePath(),
+    ]);
+    if (!pendingLabel || !pendingBundlePath) return false;
+    const promoted = await this._promotePendingBundle();
+    return promoted;
+  }
+
   /** Clean up listeners. Call when the app is unmounting. */
   destroy(): void {
     if (this.healthTimer) {
@@ -271,6 +358,89 @@ export class SankofaDeploy {
   }
 
   // ── Private methods ─────────────────────────────────────────────────
+
+  private _installGlobalErrorHandler(): void {
+    const ErrorUtils = (globalThis as any).ErrorUtils;
+    if (!ErrorUtils || typeof ErrorUtils.setGlobalHandler !== 'function') return;
+    const previous = typeof ErrorUtils.getGlobalHandler === 'function'
+      ? ErrorUtils.getGlobalHandler()
+      : null;
+    ErrorUtils.setGlobalHandler((err: Error, isFatal?: boolean) => {
+      this.reportError(err, { fatal: isFatal ?? true });
+      if (typeof previous === 'function') {
+        try {
+          previous(err, isFatal);
+        } catch {}
+      }
+    });
+  }
+
+  private async _onFatalError(err: Error): Promise<void> {
+    // Debounce: only act on the first fatal error per session. Repeated
+    // errors (e.g. a user tapping "Retry" on the ErrorBoundary) would
+    // otherwise spam `crash_on_update` / `rollback` events and inflate
+    // the dashboard counters.
+    if (this.fatalErrorHandled) return;
+    this.fatalErrorHandled = true;
+
+    // Cancel the auto-health timer — this boot is NOT healthy.
+    if (this.healthTimer) {
+      clearTimeout(this.healthTimer);
+      this.healthTimer = null;
+    }
+
+    try {
+      await this.storage.setBootConfirmed(false);
+      const [currentLabel, currentBundlePath] = await Promise.all([
+        this.storage.getCurrentLabel(),
+        this.storage.getCurrentBundlePath(),
+      ]);
+
+      // We're on an OTA bundle only when BOTH a label and a bundle path are
+      // set. A label alone means we're on the embedded bundle with identity
+      // info (e.g. seeded by `sankofa preview` for a base release). Embedded
+      // bundle crashes have nothing to roll back to, so we only report the
+      // crash and stop — no rollback event, no reload loop.
+      const onOtaBundle = !!(currentLabel && currentBundlePath);
+
+      this._reportEvent('crash_on_update', {
+        updateAvailable: false,
+        label: currentLabel || undefined,
+      });
+
+      if (!onOtaBundle) {
+        console.warn(`[SankofaDeploy] Fatal JS error on embedded bundle (label=${currentLabel || 'none'}) — no rollback target: ${err.message}`);
+        return;
+      }
+
+      const previousLabel = await this.storage.getPreviousLabel();
+      const previousBundlePath = await this.storage.getPreviousBundlePath();
+
+      await this.storage.setRolledBackLabel(currentLabel);
+      if (previousLabel && previousBundlePath) {
+        await this._setNativeBundlePath(previousBundlePath);
+        await this.storage.setCurrentBundlePath(previousBundlePath);
+        await this.storage.setCurrentLabel(previousLabel);
+      } else {
+        await this.storage.setCurrentLabel('');
+        await this.storage.setCurrentBundlePath(null);
+        try {
+          SankofaNativeModule.deployClearBundle();
+        } catch {}
+      }
+      await this.storage.setCrashCount(0);
+
+      this._reportEvent('rollback', {
+        updateAvailable: false,
+        label: currentLabel,
+      });
+
+      console.warn(`[SankofaDeploy] Fatal JS error — rolling back from ${currentLabel} to ${previousLabel || 'embedded bundle'}: ${err.message}`);
+      this._reloadApp();
+    } catch (rollbackErr) {
+      console.warn('[SankofaDeploy] Rollback after fatal error failed:', rollbackErr);
+    }
+  }
 
   private async _prepareLaunchState(): Promise<void> {
     const promoted = await this._promotePendingBundle();
@@ -311,6 +481,15 @@ export class SankofaDeploy {
       await this.storage.setBootConfirmed(false);
       await this.storage.setLastBootTime(0);
       await this.storage.setRolledBackLabel(null);
+
+      // Report the successful apply so the dashboard's install counters
+      // increment. Without this the Releases page shows 0 installs even
+      // though devices are running the bundle.
+      this._reportEvent('apply_success', {
+        updateAvailable: true,
+        label: pendingLabel,
+      });
+
       this._reloadApp();
       return true;
     } catch (err) {
@@ -522,7 +701,13 @@ export class SankofaDeploy {
             if (version) return version;
           }
         } catch {}
-        return '1.0.0';
+        // No fallback: returning a fake version (e.g. "1.0.0") silently
+        // matches the app against unrelated older releases whose embedded
+        // assets/fonts don't exist in the current binary, leading to crashes
+        // on restart. An empty string causes the server to respond with
+        // `missing_update_context`, which the UI surfaces as a visible error.
+        console.warn('[SankofaDeploy] Native app version unavailable — update check will be skipped until the native module is ready.');
+        return '';
       })();
     }
     return this.appVersionPromise;

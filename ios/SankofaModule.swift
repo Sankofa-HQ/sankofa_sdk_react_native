@@ -2,6 +2,7 @@ import ExpoModulesCore
 import UIKit
 import CommonCrypto
 import zlib
+import SSZipArchive
 
 private let sankofaDeployBundlePathKey = "sankofa_deploy_bundle_path"
 private let sankofaDeployDistinctIdKey = "sankofa_deploy_distinct_id"
@@ -159,8 +160,12 @@ public class SankofaModule: Module {
     // DEPLOY — OTA bundle download, verify, and reload
     // ═══════════════════════════════════════════════════════════════════
 
-    // Downloads a gzipped JS bundle, decompresses, verifies SHA256,
-    // saves to the app's Documents directory. Returns the local path.
+    // Downloads an OTA archive (zip of bundle.jsbundle + assets/), verifies
+    // SHA256 against the downloaded bytes, and unzips into a per-release
+    // directory under Application Support. Returns the absolute path to
+    // `bundle.jsbundle` inside that directory. RN's AssetSourceResolver
+    // resolves `assets/...` relative to the bundle URL's directory, so
+    // fonts/images load correctly without any custom asset wiring.
     AsyncFunction("deployDownloadBundle") { (url: String, expectedSha256: String, label: String, promise: Promise) in
       DispatchQueue.global(qos: .userInitiated).async {
         do {
@@ -170,33 +175,47 @@ public class SankofaModule: Module {
           }
 
           let fm = FileManager.default
-          let deployDir = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("sankofa_deploy", isDirectory: true)
-          try? fm.createDirectory(at: deployDir, withIntermediateDirectories: true)
+          let deployRoot = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("SankofaDeploy", isDirectory: true)
+          try? fm.createDirectory(at: deployRoot, withIntermediateDirectories: true)
 
-          let tempFile = deployDir.appendingPathComponent("bundle_temp.jsbundle.gz")
-          let finalFile = deployDir.appendingPathComponent(
-            "\(sankofaDeploySanitizeFilePart(label))_\(String(expectedSha256.prefix(12))).jsbundle"
-          )
+          let releaseDirName = "\(sankofaDeploySanitizeFilePart(label))_\(String(expectedSha256.prefix(12)))"
+          let releaseDir = deployRoot.appendingPathComponent(releaseDirName, isDirectory: true)
+          let tempArchive = deployRoot.appendingPathComponent("\(releaseDirName).download.zip")
 
           // 1. Download
           let data = try Data(contentsOf: downloadUrl)
-          try data.write(to: tempFile)
 
-          // 2. Decompress gzip
-          let decompressed = try Data(contentsOf: tempFile).sankofaDeployGunzipped()
-          try decompressed.write(to: finalFile)
-          try? fm.removeItem(at: tempFile)
-
-          // 3. Verify SHA256
-          let hash = decompressed.sankofaDeploySHA256Hex()
+          // 2. Verify SHA256 of the archive bytes (matches CLI's hash)
+          let hash = data.sankofaDeploySHA256Hex()
           guard hash == expectedSha256 else {
-            try? fm.removeItem(at: finalFile)
-            promise.reject("ERR_HASH_MISMATCH", "SHA256 mismatch: expected=\(expectedSha256) actual=\(hash)")
+            promise.reject("ERR_HASH_MISMATCH", "Archive SHA256 mismatch: expected=\(expectedSha256) actual=\(hash)")
+            return
+          }
+          try data.write(to: tempArchive)
+
+          // 3. Unzip into a fresh release dir. Wipe any prior copy first so
+          //    a re-download can't pick up stale files from a partial extract.
+          if fm.fileExists(atPath: releaseDir.path) {
+            try? fm.removeItem(at: releaseDir)
+          }
+          try fm.createDirectory(at: releaseDir, withIntermediateDirectories: true)
+          guard SSZipArchive.unzipFile(atPath: tempArchive.path, toDestination: releaseDir.path) else {
+            try? fm.removeItem(at: tempArchive)
+            try? fm.removeItem(at: releaseDir)
+            promise.reject("ERR_UNZIP", "Failed to unzip OTA archive")
+            return
+          }
+          try? fm.removeItem(at: tempArchive)
+
+          let bundleFile = releaseDir.appendingPathComponent("bundle.jsbundle")
+          guard fm.fileExists(atPath: bundleFile.path) else {
+            try? fm.removeItem(at: releaseDir)
+            promise.reject("ERR_BUNDLE_MISSING", "Archive did not contain bundle.jsbundle")
             return
           }
 
-          promise.resolve(finalFile.path)
+          promise.resolve(bundleFile.path)
         } catch {
           promise.reject("ERR_DOWNLOAD", "Bundle download failed: \(error.localizedDescription)")
         }
@@ -222,32 +241,75 @@ public class SankofaModule: Module {
       UserDefaults.standard.set(path, forKey: sankofaDeployBundlePathKey)
     }
 
-    // Deletes the OTA bundle and resets to the embedded bundle.
+    // Deletes the OTA release directory (bundle + assets) and resets to the
+    // embedded bundle. We delete the parent directory because the OTA archive
+    // unzips bundle.jsbundle alongside an `assets/` tree.
     Function("deployClearBundle") {
       if let path = UserDefaults.standard.string(forKey: sankofaDeployBundlePathKey) {
-        try? FileManager.default.removeItem(atPath: path)
+        let bundleURL = URL(fileURLWithPath: path)
+        let parentDir = bundleURL.deletingLastPathComponent()
+        // Sanity check: only delete if it looks like a SankofaDeploy release dir.
+        if parentDir.path.contains("/SankofaDeploy/") {
+          try? FileManager.default.removeItem(at: parentDir)
+        } else {
+          try? FileManager.default.removeItem(atPath: path)
+        }
       }
       UserDefaults.standard.removeObject(forKey: sankofaDeployBundlePathKey)
     }
 
-    // Triggers a JS bundle reload.
+    // Triggers a JS bundle reload so the new OTA bundle is picked up.
+    //
+    // Three strategies, tried in order:
+    //   1. Expo Updates (`EXUpdatesAppController.requestRelaunch`). Fully
+    //      relaunches the app process, which is the most reliable.
+    //   2. React Native's C function `RCTTriggerReloadCommandListeners`.
+    //      Resolved dynamically via dlsym because the symbol isn't directly
+    //      importable from Swift without an ObjC bridging header. Calling
+    //      this C function is what actually works on new-architecture /
+    //      bridgeless RN: it invokes every registered `RCTReloadListener`
+    //      (the bridge, the bridgeless host) AND posts the notification.
+    //   3. Plain `NotificationCenter` post as a last-resort fallback for
+    //      older RN versions that don't export the C symbol.
     Function("deployReload") {
       DispatchQueue.main.async {
-        // Try Expo Updates first
+        NSLog("[SankofaDeploy] deployReload invoked")
+
         if let updatesClass = NSClassFromString("EXUpdatesAppController") as? NSObject.Type,
            let controller = updatesClass.value(forKey: "sharedInstance") as? NSObject {
+          NSLog("[SankofaDeploy] requesting relaunch via Expo Updates")
           controller.perform(NSSelectorFromString("requestRelaunch"))
           return
         }
-        // Fallback: RCTBridge reload
-        NotificationCenter.default.post(name: NSNotification.Name("RCTBridgeWillReloadNotification"), object: nil)
+
+        // Look up `RCTTriggerReloadCommandListeners` in the current process
+        // (it's linked in via React-Core). dlopen(nil, ...) opens the main
+        // executable's symbol table without loading anything new.
+        typealias TriggerReloadFn = @convention(c) (NSString) -> Void
+        if let handle = dlopen(nil, RTLD_NOW),
+           let sym = dlsym(handle, "RCTTriggerReloadCommandListeners") {
+          NSLog("[SankofaDeploy] calling RCTTriggerReloadCommandListeners")
+          let fn = unsafeBitCast(sym, to: TriggerReloadFn.self)
+          fn("SankofaDeploy" as NSString)
+          return
+        }
+
+        NSLog("[SankofaDeploy] falling back to NotificationCenter")
+        NotificationCenter.default.post(
+          name: NSNotification.Name("RCTTriggerReloadCommandNotification"),
+          object: nil,
+          userInfo: [
+            "RCTTriggerReloadCommandSourceKey": "SankofaDeploy",
+            "RCTTriggerReloadCommandReasonKey": "OTA bundle applied",
+          ]
+        )
       }
     }
 
     // MARK: - Deploy metadata and persistent storage
 
     Function("deployGetAppVersion") { () -> String in
-      Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+      Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
     }
 
     Function("deployGetDistinctId") { () -> String in
