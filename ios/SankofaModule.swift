@@ -329,9 +329,25 @@ public class SankofaModule: Module {
     }
 
     Function("deployGetDeviceInfo") { () -> [String: String] in
-      [
+      // Locale is BCP-47 (e.g. "en-US"), normalized to hyphen form so the
+      // server-side rules engine can compare against canonical values.
+      let rawLocale = Locale.current.identifier
+      let locale = rawLocale.replacingOccurrences(of: "_", with: "-")
+
+      // Prefer utsname.machine ("iPhone14,3") over UIDevice.model's generic
+      // "iPhone" so targeting rules can exclude specific hardware.
+      var sysinfo = utsname()
+      uname(&sysinfo)
+      let machine = withUnsafePointer(to: &sysinfo.machine) {
+        $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: sysinfo.machine)) {
+          String(cString: $0)
+        }
+      }
+
+      return [
         "osVersion": UIDevice.current.systemVersion,
-        "deviceModel": UIDevice.current.model
+        "deviceModel": machine.isEmpty ? UIDevice.current.model : machine,
+        "locale": locale
       ]
     }
 

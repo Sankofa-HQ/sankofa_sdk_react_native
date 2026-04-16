@@ -303,11 +303,24 @@ class SankofaModule : Module() {
     }
 
     Function("deployGetDeviceInfo") {
+      // BCP-47 language tag so the server-side rules engine sees a canonical
+      // value regardless of Android API level.
+      val locale = try {
+        val ctx = requireApplicationContext()
+        if (ctx != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+          ctx.resources.configuration.locales[0].toLanguageTag()
+        } else {
+          java.util.Locale.getDefault().toLanguageTag()
+        }
+      } catch (e: Exception) {
+        java.util.Locale.getDefault().toLanguageTag()
+      }
       mapOf(
         "osVersion" to Build.VERSION.RELEASE,
         "deviceModel" to listOf(Build.MANUFACTURER, Build.MODEL)
           .filter { it.isNotBlank() }
-          .joinToString(" ")
+          .joinToString(" "),
+        "locale" to locale
       )
     }
 

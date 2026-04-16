@@ -10,11 +10,31 @@ export type { DeployConfig, UpdateCheckResult, DeployStatus } from './deploy/Dep
 
 /**
  * Module configuration returned by the unified handshake.
- * Stored globally so SankofaDeploy and other modules can read it
- * without making redundant HTTP calls.
+ *
+ * There are three canonical modules: analytics, deploy, catch. Replay
+ * and heatmap are features that live UNDER analytics — new SDK code
+ * should read `modules.analytics.replay` / `modules.analytics.heatmap`.
+ *
+ * `modules.replay` is preserved at the top level for backwards
+ * compatibility with older builds that still read it directly; the
+ * server mirrors the same payload to both locations.
  */
+export interface ReplayFeatureConfig {
+  enabled: boolean;
+  sample_rate?: number;
+  mask_all_inputs?: boolean;
+  capture_network?: boolean;
+  high_fidelity_triggers?: string[];
+  high_fidelity_duration_seconds?: number;
+}
+
 export interface HandshakeModules {
-  analytics?: { enabled: boolean; sampling_rate?: number };
+  analytics?: {
+    enabled: boolean;
+    sampling_rate?: number;
+    replay?: ReplayFeatureConfig;
+    heatmap?: { enabled: boolean };
+  };
   catch?: { enabled: boolean };
   deploy?: {
     enabled: boolean;
@@ -27,14 +47,8 @@ export interface HandshakeModules {
     release_id?: string;
     reason?: string;
   };
-  replay?: {
-    enabled: boolean;
-    sample_rate?: number;
-    mask_all_inputs?: boolean;
-    capture_network?: boolean;
-    high_fidelity_triggers?: string[];
-    high_fidelity_duration_seconds?: number;
-  };
+  /** @deprecated Read from `modules.analytics.replay` instead. Kept for back-compat. */
+  replay?: ReplayFeatureConfig;
 }
 
 /** Shared config set by Sankofa.initialize(). Readable by SankofaDeploy. */

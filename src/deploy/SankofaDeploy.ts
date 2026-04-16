@@ -111,11 +111,12 @@ export class SankofaDeploy {
    */
   async checkForUpdate(): Promise<UpdateCheckResult> {
     try {
-      const [currentLabel, rolledBackLabel, appVersion, distinctId] = await Promise.all([
+      const [currentLabel, rolledBackLabel, appVersion, distinctId, deviceInfo] = await Promise.all([
         this.storage.getCurrentLabel(),
         this.storage.getRolledBackLabel(),
         this._getAppVersion(),
         this._getDistinctId(),
+        this._getDeviceInfo(),
       ]);
 
       const params = new URLSearchParams({
@@ -124,6 +125,12 @@ export class SankofaDeploy {
         distinct_id: distinctId,
         platform: Platform.OS,
       });
+      // Targeting context — rules engine on the server needs these to
+      // gate releases by OS version range, device model, or locale.
+      // Country is resolved server-side from the request IP.
+      if (deviceInfo.osVersion) params.set('os_version', deviceInfo.osVersion);
+      if (deviceInfo.deviceModel) params.set('device_model', deviceInfo.deviceModel);
+      if (deviceInfo.locale) params.set('locale', deviceInfo.locale);
 
       let deployData: Record<string, any> | null = null;
       const failureReasons: string[] = [];
@@ -737,13 +744,14 @@ export class SankofaDeploy {
     return this.distinctIdPromise;
   }
 
-  private async _getDeviceInfo(): Promise<{ osVersion?: string; deviceModel?: string }> {
+  private async _getDeviceInfo(): Promise<{ osVersion?: string; deviceModel?: string; locale?: string }> {
     try {
       if (typeof SankofaNativeModule.deployGetDeviceInfo === 'function') {
         const info = await SankofaNativeModule.deployGetDeviceInfo();
         return {
           osVersion: info?.osVersion || info?.os_version,
           deviceModel: info?.deviceModel || info?.device_model,
+          locale: info?.locale,
         };
       }
     } catch {}
