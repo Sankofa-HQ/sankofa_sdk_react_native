@@ -338,8 +338,10 @@ public class SankofaModule: Module {
       // "iPhone" so targeting rules can exclude specific hardware.
       var sysinfo = utsname()
       uname(&sysinfo)
-      let machine = withUnsafePointer(to: &sysinfo.machine) {
-        $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: sysinfo.machine)) {
+      var machineValue = sysinfo.machine
+      let machineValueCapacity = MemoryLayout.size(ofValue: machineValue)
+      let machine = withUnsafePointer(to: &machineValue) {
+        $0.withMemoryRebound(to: CChar.self, capacity: machineValueCapacity) {
           String(cString: $0)
         }
       }

@@ -2,6 +2,7 @@ import { AppState, Platform } from 'react-native';
 import SankofaNativeModule from '../SankofaModule';
 import { DeployStorage } from './DeployStorage';
 import { getSharedApiKey, getSharedEndpoint } from '../index';
+import { registerModule, type SankofaModule } from '../core/ModuleRegistry';
 import type {
   DeployConfig,
   UpdateCheckResult,
@@ -41,7 +42,10 @@ const HEALTH_CONFIRM_MS = 10_000; // 10 seconds after boot
  * deploy.notifyAppReady();
  * ```
  */
-export class SankofaDeploy {
+export class SankofaDeploy implements SankofaModule {
+  /** Traffic Cop: identifies this module to the Core registry. */
+  public readonly name = 'deploy' as const;
+
   private config: DeployConfig & {
     apiKey: string;
     serverUrl: string;
@@ -56,6 +60,8 @@ export class SankofaDeploy {
   private appVersionPromise: Promise<string> | null = null;
   private distinctIdPromise: Promise<string> | null = null;
   private fatalErrorHandled: boolean = false;
+  /** Cached handshake config from the Core. null until applyHandshake fires. */
+  private serverConfig: Record<string, unknown> | null = null;
 
   constructor(config: DeployConfig = {}) {
     this.config = {
@@ -84,6 +90,22 @@ export class SankofaDeploy {
         this._handleAppStateChange.bind(this),
       );
     }
+
+    // Traffic Cop: announce ourselves to the Core so the handshake
+    // router can route `deploy: { enabled: true }` flags to this instance.
+    registerModule(this);
+  }
+
+  /**
+   * Traffic Cop — invoked by the Core when the handshake response
+   * says `deploy.enabled = true`. Caches the server-provided deploy
+   * config (has_update, download_url, label, sha256, etc.) so
+   * `checkForUpdate()` can skip the network call on the first launch
+   * after initialize() completes. If the module isn't registered,
+   * this method is never called and Deploy stays dormant.
+   */
+  applyHandshake(config: unknown): void {
+    this.serverConfig = config as Record<string, unknown>;
   }
 
   /**

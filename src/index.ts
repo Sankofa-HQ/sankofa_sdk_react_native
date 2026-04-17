@@ -1,5 +1,6 @@
 import SankofaNativeModule from './SankofaModule';
 import type { SankofaConfig, SankofaPersonTraits } from './SankofaTypes';
+import { markCoreInitialized, routeHandshake, getInstalledModules } from './core/ModuleRegistry';
 
 export type { SankofaConfig, SankofaPersonTraits };
 export { useSankofaScreen } from './hooks/useSankofaScreen';
@@ -7,6 +8,10 @@ export { useSankofaScreen } from './hooks/useSankofaScreen';
 // Sankofa Deploy — OTA update module
 export { SankofaDeploy } from './deploy/SankofaDeploy';
 export type { DeployConfig, UpdateCheckResult, DeployStatus } from './deploy/DeployTypes';
+
+// Traffic Cop — module registry (public for advanced use / future modules)
+export type { SankofaModule, SankofaModuleName } from './core/ModuleRegistry';
+export { hasModule, getInstalledModules } from './core/ModuleRegistry';
 
 /**
  * Module configuration returned by the unified handshake.
@@ -126,6 +131,10 @@ export const Sankofa = {
     _sharedApiKey = apiKey;
     _sharedEndpoint = endpoint;
 
+    // Mark core as initialized so modules instantiated AFTER this point
+    // can register without emitting the "created before initialize()" warning.
+    markCoreInitialized();
+
     // 1. Initialize native layer (sync — bridges to Swift/Kotlin)
     SankofaNativeModule.initialize(apiKey, {
       endpoint,
@@ -138,9 +147,27 @@ export const Sankofa = {
     });
 
     // 2. Call unified handshake (async — doesn't block initialization)
+    // Reverse Handshake: we append `installed=core,deploy,...` so the
+    // server knows what this app binary can actually run. The dashboard
+    // uses this to gate UI toggles for modules the SDK doesn't have.
+    // Legacy SDKs (no `installed` param) default to "allow everything"
+    // server-side so we stay backward compatible.
     _handshakePromise = (async () => {
       try {
-        const res = await fetch(`${endpoint}/api/v1/handshake`, {
+        // Defer to the next tick so modules constructed on the same
+        // synchronous pass (e.g. `new SankofaDeploy()` right after
+        // `Sankofa.initialize()`) land in the registry before we send
+        // the reverse handshake.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+        const installed = getInstalledModules().join(',');
+        const params = new URLSearchParams({
+          installed,
+          sdk: 'react-native',
+        });
+        const url = `${endpoint.replace(/\/$/, '')}/api/v1/handshake?${params}`;
+
+        const res = await fetch(url, {
           headers: { 'x-api-key': apiKey },
         });
         if (!res.ok) return null;
@@ -150,9 +177,13 @@ export const Sankofa = {
         if (config.debug) {
           const mods = _handshakeModules;
           console.log(
-            `[Sankofa] Handshake OK — analytics:${mods?.analytics?.enabled} replay:${mods?.replay?.enabled} deploy:${mods?.deploy?.enabled} catch:${mods?.catch?.enabled}`,
+            `[Sankofa] Handshake OK — analytics:${mods?.analytics?.enabled} replay:${mods?.replay?.enabled} deploy:${mods?.deploy?.enabled} catch:${mods?.catch?.enabled} (installed: ${installed})`,
           );
         }
+
+        // Traffic Cop — route each enabled module flag to its registered
+        // handler. Flags for missing modules get a dev warning + prod no-op.
+        await routeHandshake(_handshakeModules);
 
         return _handshakeModules;
       } catch (err) {
