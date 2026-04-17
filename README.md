@@ -77,7 +77,7 @@ This package follows standard React Native autolinking.
 
 ## Sankofa Deploy
 
-Deploy checks for OTA JavaScript updates with the same `sk_live_` / `sk_test_` SDK key used by analytics. Publishing releases uses a separate Deploy Token in the CLI.
+Push OTA JavaScript updates to your users without going through the App Store. Uses the same API key as analytics.
 
 ```tsx
 import { Sankofa, SankofaDeploy } from 'sankofa-react-native';
@@ -122,44 +122,13 @@ npx expo prebuild
 
 ### Bare React Native
 
-Android release hosts should prefer the Sankofa bundle provider:
+For bare React Native projects (without Expo), run the CLI setup command to automatically patch your native files:
 
-```kotlin
-import dev.sankofa.rn.SankofaDeployBundleProvider
-
-override fun getJSBundleFile(): String? {
-  return SankofaDeployBundleProvider.getJSBundleFile(applicationContext)
-    ?: super.getJSBundleFile()
-}
+```bash
+sankofa init
 ```
 
-iOS release hosts should prefer the Sankofa bundle URL before the embedded bundle:
-
-```swift
-import SankofaReactNative
-
-override func bundleURL() -> URL? {
-  #if DEBUG
-  return RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: "index")
-  #else
-  if let url = SankofaDeployBundleProvider.bundleURL() {
-    return url
-  }
-  return Bundle.main.url(forResource: "main", withExtension: "jsbundle")
-  #endif
-}
-```
-
----
-
-## Local Development (Monorepo)
-
-If you are a contributor working inside the Sankofa monorepo, the SDK **automatically detects** the sibling native SDKs and links to their source code for a seamless development experience. No manual configuration is required.
-
-- **iOS**: Automatically links `sankofa_sdk_ios`.
-- **Android**: Automatically links `sankofa_sdk_android`.
-
-For external contributors who wish to force a specific mode, you can still use the `SANKOFA_SOURCE_SDK=1` (iOS) or `sankofa.sourceSdk=true` (Android) overrides.
+This adds the OTA bundle provider to `MainApplication.kt` and `AppDelegate.swift`. If auto-patching fails, the CLI prints the exact code to add manually.
 
 ---
 
