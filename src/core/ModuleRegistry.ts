@@ -30,7 +30,12 @@
 import type { HandshakeModules } from '../index';
 
 /** The canonical module names Sankofa ships. */
-export type SankofaModuleName = 'analytics' | 'deploy' | 'catch';
+export type SankofaModuleName =
+  | 'analytics'
+  | 'deploy'
+  | 'catch'
+  | 'switch'
+  | 'config';
 
 /**
  * Interface every pluggable module implements. The Core never imports
@@ -145,6 +150,34 @@ export async function routeHandshake(modules: HandshakeModules | null): Promise<
       console.warn(
         `[Sankofa] Server enabled "catch" but SankofaCatch is not imported. ` +
         `Install the Catch module to enable crash reporting.`,
+      );
+    }
+  }
+
+  // Switch — feature flags
+  if (modules.switch?.enabled) {
+    const switchMod = REGISTERED.get('switch');
+    if (switchMod) {
+      await switchMod.applyHandshake(modules.switch);
+    } else if (__DEV__) {
+      console.warn(
+        `[Sankofa] Server enabled "switch" but SankofaSwitch is not imported. ` +
+        `Add \`import { SankofaSwitch } from 'sankofa-react-native'\` and ` +
+        `\`new SankofaSwitch()\` after Sankofa.initialize().`,
+      );
+    }
+  }
+
+  // Config — remote config
+  if (modules.config?.enabled) {
+    const configMod = REGISTERED.get('config');
+    if (configMod) {
+      await configMod.applyHandshake(modules.config);
+    } else if (__DEV__) {
+      console.warn(
+        `[Sankofa] Server enabled "config" but SankofaConfig is not imported. ` +
+        `Add \`import { SankofaConfig } from 'sankofa-react-native'\` and ` +
+        `\`new SankofaConfig()\` after Sankofa.initialize().`,
       );
     }
   }

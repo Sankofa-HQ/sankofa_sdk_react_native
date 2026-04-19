@@ -1,13 +1,37 @@
 import SankofaNativeModule from './SankofaModule';
-import type { SankofaConfig, SankofaPersonTraits } from './SankofaTypes';
+import type { SankofaInitConfig, SankofaPersonTraits } from './SankofaTypes';
 import { markCoreInitialized, routeHandshake, getInstalledModules } from './core/ModuleRegistry';
 
-export type { SankofaConfig, SankofaPersonTraits };
+// SankofaInitConfig is the canonical name for the init options; the old
+// `SankofaConfig` TYPE is now a deprecated alias kept inside
+// ./SankofaTypes for back-compat. From this re-export path we only
+// surface the new name so the `SankofaConfig` value (the remote-config
+// class below) has the identifier to itself.
+export type { SankofaInitConfig, SankofaPersonTraits } from './SankofaTypes';
 export { useSankofaScreen } from './hooks/useSankofaScreen';
 
 // Sankofa Deploy — OTA update module
 export { SankofaDeploy } from './deploy/SankofaDeploy';
 export type { DeployConfig, UpdateCheckResult, DeployStatus } from './deploy/DeployTypes';
+
+// Sankofa Switch — feature flags + A/B variants
+export { SankofaSwitch } from './switch/SankofaSwitch';
+export type {
+  FlagDecision,
+  FlagReason,
+  FlagChangeListener,
+  SankofaSwitchAPI,
+} from './switch/SwitchTypes';
+
+// Sankofa Config — remote config with typed values
+export { SankofaConfig } from './config/SankofaConfig';
+export type {
+  ItemDecision,
+  ItemReason,
+  ConfigType,
+  ConfigChangeListener,
+  SankofaConfigAPI,
+} from './config/ConfigTypes';
 
 // Traffic Cop — module registry (public for advanced use / future modules)
 export type { SankofaModule, SankofaModuleName } from './core/ModuleRegistry';
@@ -52,6 +76,22 @@ export interface HandshakeModules {
     release_id?: string;
     reason?: string;
   };
+  /** Sankofa Switch — full payload is passed to SankofaSwitch.applyHandshake. */
+  switch?: {
+    enabled: boolean;
+    flags?: Record<string, unknown>;
+    etag?: string;
+    reason?: string;
+    error?: string;
+  };
+  /** Sankofa Config — full payload is passed to SankofaConfig.applyHandshake. */
+  config?: {
+    enabled: boolean;
+    values?: Record<string, unknown>;
+    etag?: string;
+    reason?: string;
+    error?: string;
+  };
   /** @deprecated Read from `modules.analytics.replay` instead. Kept for back-compat. */
   replay?: ReplayFeatureConfig;
 }
@@ -68,6 +108,17 @@ export function getSharedEndpoint(): string { return _sharedEndpoint; }
 /** Cached handshake response. Readable by SankofaDeploy and other modules. */
 let _handshakeModules: HandshakeModules | null = null;
 let _handshakePromise: Promise<HandshakeModules | null> | null = null;
+
+/**
+ * Composite ETag from the last successful handshake. Sent as
+ * If-None-Match on the next refresh so the server can respond with
+ * 304 when nothing has changed. Server computes this by hashing the
+ * union of per-module etags (see server/engine/ee/deploy/handshake.go).
+ */
+let _handshakeEtag = '';
+export function getHandshakeEtag(): string {
+  return _handshakeEtag;
+}
 
 /**
  * Returns the cached handshake modules. If the handshake hasn't
@@ -124,7 +175,7 @@ export const Sankofa = {
    * @param apiKey - Your Sankofa project API key.
    * @param config - Optional configuration overrides.
    */
-  initialize(apiKey: string, config: SankofaConfig = {}): void {
+  initialize(apiKey: string, config: SankofaInitConfig = {}): void {
     const endpoint = config.endpoint ?? 'https://api.sankofa.dev';
 
     // Store for SankofaDeploy and other modules to read
@@ -167,17 +218,32 @@ export const Sankofa = {
         });
         const url = `${endpoint.replace(/\/$/, '')}/api/v1/handshake?${params}`;
 
-        const res = await fetch(url, {
-          headers: { 'x-api-key': apiKey },
-        });
+        const headers: Record<string, string> = { 'x-api-key': apiKey };
+        if (_handshakeEtag) headers['If-None-Match'] = _handshakeEtag;
+
+        const res = await fetch(url, { headers });
+
+        // 304 — the server says our cached modules are still current.
+        // Re-fire routeHandshake anyway so modules constructed between
+        // the previous handshake and now (hot reload, lazy imports)
+        // pick up the payload they missed.
+        if (res.status === 304 && _handshakeModules) {
+          if (config.debug) {
+            console.log('[Sankofa] Handshake 304 — cached modules still current');
+          }
+          await routeHandshake(_handshakeModules);
+          return _handshakeModules;
+        }
+
         if (!res.ok) return null;
         const data = await res.json();
         _handshakeModules = (data.modules as HandshakeModules) ?? null;
+        _handshakeEtag = res.headers.get('etag') ?? res.headers.get('ETag') ?? '';
 
         if (config.debug) {
           const mods = _handshakeModules;
           console.log(
-            `[Sankofa] Handshake OK — analytics:${mods?.analytics?.enabled} replay:${mods?.replay?.enabled} deploy:${mods?.deploy?.enabled} catch:${mods?.catch?.enabled} (installed: ${installed})`,
+            `[Sankofa] Handshake OK — analytics:${mods?.analytics?.enabled} replay:${mods?.replay?.enabled} deploy:${mods?.deploy?.enabled} catch:${mods?.catch?.enabled} switch:${mods?.switch?.enabled} config:${mods?.config?.enabled} (installed: ${installed})`,
           );
         }
 

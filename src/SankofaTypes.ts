@@ -2,7 +2,7 @@
  * Configuration options for the Sankofa React Native SDK.
  * Mirrors SankofaConfig in the iOS and Android native SDKs.
  */
-export interface SankofaConfig {
+export interface SankofaInitConfig {
   /**
    * Base URL of your Sankofa engine.
    * @default 'https://api.sankofa.dev'
@@ -45,6 +45,13 @@ export interface SankofaConfig {
    */
   batchSize?: number;
 }
+
+/**
+ * @deprecated Renamed to `SankofaInitConfig` in v0.2 to free the
+ * `SankofaConfig` name for the new remote-config module class.
+ * Kept as a type alias for back-compat; remove in a future major.
+ */
+export type SankofaConfig = SankofaInitConfig;
 
 /**
  * User identity traits for `Sankofa.setPerson()`.
