@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import SankofaNativeModule from './SankofaModule';
 import type { SankofaInitConfig, SankofaPersonTraits } from './SankofaTypes';
 import { markCoreInitialized, routeHandshake, getInstalledModules } from './core/ModuleRegistry';
@@ -215,7 +216,23 @@ export const Sankofa = {
         const params = new URLSearchParams({
           installed,
           sdk: 'react-native',
+          platform: Platform.OS, // 'ios' | 'android' | 'web'
+          os_version: String(Platform.Version ?? ''),
         });
+        // Best-effort identity forwarding. The native bridge exposes a
+        // getDistinctId method when the Analytics module is linked;
+        // if it's not (Switch/Config-only integration) we skip the
+        // identity param and the server falls back to anonymous
+        // bucketing. Platform + OS targeting still works either way.
+        try {
+          const maybeGetId = (SankofaNativeModule as any).getDistinctId;
+          if (typeof maybeGetId === 'function') {
+            const id = await maybeGetId();
+            if (id) params.set('distinct_id', String(id));
+          }
+        } catch {
+          // Native module error — ignore, fall through.
+        }
         const url = `${endpoint.replace(/\/$/, '')}/api/v1/handshake?${params}`;
 
         const headers: Record<string, string> = { 'x-api-key': apiKey };
