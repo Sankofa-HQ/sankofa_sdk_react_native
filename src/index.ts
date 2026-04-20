@@ -224,14 +224,35 @@ export const Sankofa = {
         // if it's not (Switch/Config-only integration) we skip the
         // identity param and the server falls back to anonymous
         // bucketing. Platform + OS targeting still works either way.
+        let resolvedDistinctId = '';
         try {
           const maybeGetId = (SankofaNativeModule as any).getDistinctId;
           if (typeof maybeGetId === 'function') {
             const id = await maybeGetId();
-            if (id) params.set('distinct_id', String(id));
+            if (id) {
+              resolvedDistinctId = String(id);
+              params.set('distinct_id', resolvedDistinctId);
+            }
           }
         } catch {
           // Native module error — ignore, fall through.
+        }
+        // Identity stitching: once identify() has fired, the bridge's
+        // getAnonymousId still returns the pre-identify id. Sending both
+        // lets the server fold pre- and post-identify flag evaluations
+        // into a single experiment subject. Only forward when the two
+        // ids diverge — otherwise anon_id is redundant with distinct_id.
+        try {
+          const maybeGetAnon = (SankofaNativeModule as any).getAnonymousId;
+          if (typeof maybeGetAnon === 'function') {
+            const anonId = await maybeGetAnon();
+            if (anonId && String(anonId) !== resolvedDistinctId) {
+              params.set('anon_id', String(anonId));
+            }
+          }
+        } catch {
+          // Older bridge builds don't expose getAnonymousId; skipping is
+          // correct (server treats empty anon_id as "no stitching needed").
         }
         const url = `${endpoint.replace(/\/$/, '')}/api/v1/handshake?${params}`;
 
