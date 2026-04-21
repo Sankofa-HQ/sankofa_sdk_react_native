@@ -34,6 +34,27 @@ export type {
   SankofaConfigAPI,
 } from './config/ConfigTypes';
 
+// Sankofa Catch — error tracking + crash reporting
+export { SankofaCatch } from './catch/SankofaCatch';
+export type { SankofaCatchOptions } from './catch/SankofaCatch';
+export type {
+  CatchEvent,
+  Breadcrumb,
+  CaptureOptions,
+  DebugImage,
+  DebugMeta,
+  Exception,
+  EventType,
+  Level,
+  Mechanism,
+  Platform as CatchPlatform,
+  SankofaCatchAPI,
+  StackFrame,
+  StackTrace,
+  UserContext as CatchUserContext,
+  DeviceContext as CatchDeviceContext,
+} from './catch/CatchTypes';
+
 // Traffic Cop — module registry (public for advanced use / future modules)
 export type { SankofaModule, SankofaModuleName } from './core/ModuleRegistry';
 export { hasModule, getInstalledModules } from './core/ModuleRegistry';
