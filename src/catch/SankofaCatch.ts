@@ -55,6 +55,23 @@ export interface SankofaCatchOptions {
   readFlagSnapshot?: () => Record<string, string> | undefined;
   /** Optional reader for the current config values — attached to every event. */
   readConfigSnapshot?: () => Record<string, unknown> | undefined;
+
+  /**
+   * Optional identity supplier called at capture time. Host apps
+   * that track their own session/identity (e.g. Sankofa Analytics,
+   * a custom auth layer) wire this to join Catch events with the
+   * same session's replays + analytics events on the dashboard.
+   *
+   * Return shape:
+   *   { distinctId?: string; anonymousId?: string; sessionId?: string }
+   *
+   * Any field may be undefined; the server tolerates missing ids.
+   */
+  readIdentity?: () => {
+    distinctId?: string;
+    anonymousId?: string;
+    sessionId?: string;
+  } | undefined;
 }
 
 export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
@@ -70,6 +87,13 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
   private readonly appVersion?: string;
   private readonly readFlagSnapshot?: () => Record<string, string> | undefined;
   private readonly readConfigSnapshot?: () => Record<string, unknown> | undefined;
+  // Identity supplier — called at event-capture time so a mid-session
+  // login / logout is reflected on subsequent errors.
+  private readonly readIdentity?: () => {
+    distinctId?: string;
+    anonymousId?: string;
+    sessionId?: string;
+  } | undefined;
 
   // Sticky context — merged into every outgoing event.
   private user: UserContext | null = null;
@@ -86,6 +110,7 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
     this.appVersion = options.appVersion;
     this.readFlagSnapshot = options.readFlagSnapshot;
     this.readConfigSnapshot = options.readConfigSnapshot;
+    this.readIdentity = options.readIdentity;
 
     this.autocapture = new CatchBreadcrumbsAutocapture({
       buffer: this.buffer,
@@ -203,6 +228,18 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
     }
 
     const eventId = randomId();
+    // Pull identity at capture time (not init time) so a user that
+    // logs in mid-session gets the correct distinct_id on subsequent
+    // events. readIdentity is a user-supplied hook so the SDK stays
+    // unopinionated about where identity comes from.
+    const identity = (() => {
+      try {
+        return this.readIdentity?.() ?? {};
+      } catch {
+        return {};
+      }
+    })();
+
     const event: CatchEvent = {
       wire_version: WireVersionCurrent,
       event_id: eventId,
@@ -214,6 +251,10 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
 
       exception,
       message,
+
+      distinct_id: identity.distinctId,
+      anon_id: identity.anonymousId,
+      session_id: identity.sessionId,
 
       tags: { ...this.tags, ...(options.tags ?? {}) },
       extra: { ...this.extra, ...(options.extra ?? {}) },
