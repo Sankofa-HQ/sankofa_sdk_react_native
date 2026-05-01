@@ -312,6 +312,18 @@ public class SankofaModule: Module {
       Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
     }
 
+    /// Bridge accessor for the active replay session id. Returns
+    /// the empty string when there's no recording (replay sampled
+    /// out, recordSessions=false, or pre-handshake); the JS layer
+    /// maps that to omitting the field rather than sending "" so
+    /// the wire shape distinguishes "no replay" from "replay
+    /// session unknown".
+    Function("getReplaySessionId") { () -> String in
+      MainActor.assumeIsolated {
+        Sankofa.shared.replaySessionId ?? ""
+      }
+    }
+
     Function("deployGetDistinctId") { () -> String in
       let defaults = UserDefaults.standard
       if let identified = defaults.string(forKey: "dev.sankofa.distinct_id"), !identified.isEmpty {

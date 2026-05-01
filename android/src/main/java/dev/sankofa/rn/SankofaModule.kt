@@ -286,6 +286,18 @@ class SankofaModule : Module() {
       info.versionName ?: ""
     }
 
+    /**
+     * Bridge accessor for the active replay session id. Returns
+     * the empty string when there's no recording (replay sampled
+     * out, recordSessions=false, or pre-handshake); the JS layer
+     * maps that to omitting the field rather than sending "" so
+     * the wire shape distinguishes "no replay" from "replay
+     * session unknown".
+     */
+    Function("getReplaySessionId") {
+      Sankofa.replaySessionId() ?: ""
+    }
+
     Function("deployGetDistinctId") {
       val ctx = requireApplicationContext() ?: return@Function null
       val identityPrefs = ctx.getSharedPreferences("sankofa_identity", Context.MODE_PRIVATE)

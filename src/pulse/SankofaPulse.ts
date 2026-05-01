@@ -151,7 +151,7 @@ export class SankofaPulse {
       survey_id: payload.surveyId,
       respondent: payload.respondent,
       answers: payload.answers,
-      context: payload.context,
+      context: this.enrichContext(payload.context),
     });
     this.emit({
       event: 'survey_completed',
@@ -169,8 +169,38 @@ export class SankofaPulse {
     context?: Record<string, unknown>;
   }): Promise<void> {
     const client = this.makeClient();
-    await client.savePartial(payload);
+    await client.savePartial({
+      ...payload,
+      context: this.enrichContext(payload.context),
+    });
     this.emit({ event: 'survey_partial_saved', survey_id: payload.surveyId });
+  }
+
+  /**
+   * Auto-attach `replay_session_id` to outgoing context when the
+   * native bridge exposes it AND replay is actively recording.
+   * Host-supplied context wins on collision so callers can override.
+   *
+   * Lazy-required to avoid a circular import — the Sankofa root
+   * imports the Pulse module to surface it on the public API.
+   */
+  private enrichContext(
+    context?: Record<string, unknown>,
+  ): Record<string, unknown> | undefined {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires, global-require
+      const SankofaNativeModule = require('../SankofaModule').default;
+      const fn = (SankofaNativeModule as any).getReplaySessionId;
+      if (typeof fn !== 'function') return context;
+      const sid = fn();
+      if (typeof sid !== 'string' || sid.length === 0) return context;
+      return {
+        replay_session_id: sid,
+        ...(context ?? {}),
+      };
+    } catch {
+      return context;
+    }
   }
 
   /**
@@ -190,6 +220,25 @@ export class SankofaPulse {
   // ── Internals ────────────────────────────────────────────────
 
   private emit(payload: PulseEventPayload): void {
+    // Auto-emit into the host's analytics queue with a "$pulse."
+    // prefix so survey lifecycle shows up in the same dashboard /
+    // warehouse as every other event the host tracks. Listeners
+    // registered through on(...) still fire as well — that path is
+    // for in-process integrations (Slack pings, conditional UI),
+    // not for analytics. Lazy-required to avoid a circular import
+    // (Sankofa root imports the pulse module).
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires, global-require
+      const { Sankofa } = require('../index');
+      const props: Record<string, unknown> = { survey_id: payload.survey_id };
+      if (payload.response_id) props.response_id = payload.response_id;
+      if (payload.reason) props.reason = payload.reason;
+      Sankofa.track(`$pulse.${payload.event}`, props);
+    } catch {
+      // Sankofa root not loaded yet (test harness / bare import) —
+      // analytics emit is best-effort.
+    }
+
     const bucket = this.listeners.get(payload.event);
     if (!bucket) return;
     for (const listener of bucket) {
