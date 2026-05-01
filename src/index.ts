@@ -59,6 +59,42 @@ export type {
 export type { SankofaModule, SankofaModuleName } from './core/ModuleRegistry';
 export { hasModule, getInstalledModules } from './core/ModuleRegistry';
 
+// Sankofa Pulse — surveys (NPS, CSAT, custom). Renders an inline modal,
+// resolves targeting + branching locally against the same DSL the
+// server + web SDK use. Operators flip survey IDs from the dashboard;
+// the host app calls `pulse.show(surveyId)`.
+export { SankofaPulse, SurveyModal, evaluateTargeting, resolveNext } from './pulse';
+export type {
+  Survey,
+  SurveyKind,
+  SurveyStatus,
+  SurveyQuestion,
+  QuestionKind,
+  QuestionOption,
+  QuestionValidation,
+  TargetingRule,
+  RuleKind,
+  MatchOp,
+  FrequencyScope,
+  EligibilityContext,
+  Decision,
+  BranchingRule,
+  BranchingActionKind,
+  BranchingCondition,
+  CondKind,
+  CondOp,
+  AnswerState,
+  Outcome,
+  SurveyBundle,
+  SurveyTheme,
+  SubmitPayload,
+  PulseShowOptions,
+  PulseEvent,
+  PulseEventListener,
+  PulseEventPayload,
+  SurveyModalProps,
+} from './pulse';
+
 /**
  * Module configuration returned by the unified handshake.
  *
