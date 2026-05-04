@@ -80,6 +80,7 @@ export interface SurveyQuestion {
 
 export type RuleKind =
   | 'url'
+  | 'screen'
   | 'event'
   | 'user_property'
   | 'cohort'
@@ -109,6 +110,9 @@ export interface TargetingRule {
   kind: RuleKind;
   url_match?: MatchOp;
   url_value?: string;
+  /** screen — same shape as url, applied to native screen names. */
+  screen_match?: MatchOp;
+  screen_name?: string;
   event_name?: string;
   event_min_count?: number;
   event_window_days?: number;
@@ -133,6 +137,13 @@ export interface EligibilityContext {
    * here. Most surveys won't reference URL rules on mobile.
    */
   pageUrl?: string;
+  /**
+   * Native screen / route name the SDK is on. Sourced from the most
+   * recent Sankofa.screen() / useSankofaScreen() call. Empty before
+   * the first screen event fires — KindScreen rules will not match
+   * until then.
+   */
+  screenName?: string;
   recentEvents?: Record<string, number>;
   userProperties?: Record<string, unknown>;
   cohorts?: Record<string, boolean>;

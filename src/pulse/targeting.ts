@@ -38,6 +38,8 @@ function evaluateOne(rule: TargetingRule, ctx: EligibilityContext): [boolean, st
   switch (rule.kind) {
     case 'url':
       return evalUrl(rule, ctx);
+    case 'screen':
+      return evalScreen(rule, ctx);
     case 'event':
       return evalEvent(rule, ctx);
     case 'user_property':
@@ -75,6 +77,34 @@ function evalUrl(rule: TargetingRule, ctx: EligibilityContext): [boolean, string
     }
   }
   return [false, 'url_match unknown'];
+}
+
+function evalScreen(rule: TargetingRule, ctx: EligibilityContext): [boolean, string] {
+  // Mirrors evalScreen on the server. RN supplies ctx.screenName from
+  // the SankofaNavigatorObserver / Sankofa.screen() most-recent value.
+  // Empty screen never matches — operators expect screen rules to gate
+  // a known surface, not "wherever the user happens to be now".
+  const screen = ctx.screenName ?? '';
+  const value = rule.screen_name ?? '';
+  if (screen === '') return [false, 'screen unknown'];
+  switch (rule.screen_match) {
+    case 'equals':
+      return screen === value ? [true, ''] : [false, 'screen not equal'];
+    case 'contains':
+      return screen.includes(value) ? [true, ''] : [false, 'screen does not contain'];
+    case 'prefix':
+      return screen.startsWith(value) ? [true, ''] : [false, 'screen does not start with'];
+    case 'regex': {
+      let re: RegExp;
+      try {
+        re = new RegExp(value);
+      } catch {
+        return [false, 'screen regex did not compile'];
+      }
+      return re.test(screen) ? [true, ''] : [false, 'screen does not match regex'];
+    }
+  }
+  return [false, 'screen_match unknown'];
 }
 
 function evalEvent(rule: TargetingRule, ctx: EligibilityContext): [boolean, string] {
