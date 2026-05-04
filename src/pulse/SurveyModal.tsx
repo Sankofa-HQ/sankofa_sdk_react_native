@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Image,
+  Linking,
   Modal,
   ScrollView,
   StyleSheet,
@@ -13,6 +14,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 
+import { BRAND_ICON_DATA_URL, SANKOFA_ATTRIBUTION_URL } from './brand';
 import { buildTranslator, type Translator } from './i18n';
 import { SurveyState, type StateSnapshot } from './PulseState';
 import type {
@@ -244,7 +246,38 @@ const SurveyRenderer: React.FC<RendererProps> = ({
           </TouchableOpacity>
         </View>
       )}
+
+      <PoweredBySankofa themed={themed} />
     </View>
+  );
+};
+
+// Powered-by-Sankofa attribution. Mirrors the Web SDK + dashboard
+// preview row exactly so the WYSIWYG promise holds across platforms:
+// same icon, same label, same link, same border-top. Suppressed only
+// on white-label tiers (server flag flips this off in a future
+// iteration; until then it always renders).
+const PoweredBySankofa: React.FC<{ themed: ThemedStyles }> = ({ themed }) => {
+  return (
+    <TouchableOpacity
+      onPress={() => {
+        void Linking.openURL(SANKOFA_ATTRIBUTION_URL);
+      }}
+      activeOpacity={0.7}
+      style={[styles.attribution, themed.attributionBorder]}
+      accessibilityRole="link"
+      accessibilityLabel="Powered by Sankofa"
+    >
+      <Image
+        source={{ uri: BRAND_ICON_DATA_URL }}
+        style={styles.attributionIcon}
+        resizeMode="contain"
+        accessibilityIgnoresInvertColors
+      />
+      <Text style={[styles.attributionText, themed.muted]}>
+        Powered by Sankofa
+      </Text>
+    </TouchableOpacity>
   );
 };
 
@@ -571,6 +604,7 @@ interface ThemedStyles {
   scaleBtn: { borderColor: string };
   optionBtn: { borderColor: string };
   optionBtnSelected: { borderColor: string; backgroundColor: string };
+  attributionBorder: { borderTopColor: string };
 }
 
 function buildThemedStyles(theme?: SurveyTheme | null): ThemedStyles {
@@ -594,6 +628,7 @@ function buildThemedStyles(theme?: SurveyTheme | null): ThemedStyles {
       borderColor: accent,
       backgroundColor: hexWithAlpha(accent, 0.08),
     },
+    attributionBorder: { borderTopColor: border },
   };
 }
 
@@ -723,4 +758,23 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   nextText: { fontSize: 13, fontWeight: '500' },
+  attribution: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+  },
+  attributionIcon: {
+    width: 12,
+    height: 12,
+    borderRadius: 2,
+  },
+  attributionText: {
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 0.2,
+  },
 });
