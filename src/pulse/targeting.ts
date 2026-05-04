@@ -81,30 +81,42 @@ function evalUrl(rule: TargetingRule, ctx: EligibilityContext): [boolean, string
 
 function evalScreen(rule: TargetingRule, ctx: EligibilityContext): [boolean, string] {
   // Mirrors evalScreen on the server. RN supplies ctx.screenName from
-  // the SankofaNavigatorObserver / Sankofa.screen() most-recent value.
-  // Empty screen never matches — operators expect screen rules to gate
-  // a known surface, not "wherever the user happens to be now".
+  // SankofaNavigatorObserver / Sankofa.screen(). Empty screen never
+  // matches; rule passes if the SDK's screen matches the comparator
+  // against ANY entry in screen_names (OR semantics).
   const screen = ctx.screenName ?? '';
-  const value = rule.screen_name ?? '';
   if (screen === '') return [false, 'screen unknown'];
-  switch (rule.screen_match) {
+  const targets = (rule.screen_names ?? []).filter((t) => t !== '');
+  if (targets.length === 0) return [false, 'screen rule has no targets'];
+  for (const target of targets) {
+    if (matchScreen(screen, target, rule.screen_match)) return [true, ''];
+  }
+  return [false, 'screen does not match any target'];
+}
+
+function matchScreen(
+  screen: string,
+  target: string,
+  op: MatchOp | undefined,
+): boolean {
+  switch (op) {
     case 'equals':
-      return screen === value ? [true, ''] : [false, 'screen not equal'];
+      return screen === target;
     case 'contains':
-      return screen.includes(value) ? [true, ''] : [false, 'screen does not contain'];
+      return screen.includes(target);
     case 'prefix':
-      return screen.startsWith(value) ? [true, ''] : [false, 'screen does not start with'];
+      return screen.startsWith(target);
     case 'regex': {
       let re: RegExp;
       try {
-        re = new RegExp(value);
+        re = new RegExp(target);
       } catch {
-        return [false, 'screen regex did not compile'];
+        return false;
       }
-      return re.test(screen) ? [true, ''] : [false, 'screen does not match regex'];
+      return re.test(screen);
     }
   }
-  return [false, 'screen_match unknown'];
+  return false;
 }
 
 function evalEvent(rule: TargetingRule, ctx: EligibilityContext): [boolean, string] {

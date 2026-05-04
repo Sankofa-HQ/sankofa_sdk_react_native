@@ -110,9 +110,10 @@ export interface TargetingRule {
   kind: RuleKind;
   url_match?: MatchOp;
   url_value?: string;
-  /** screen — same shape as url, applied to native screen names. */
+  /** screen — same comparator set as url, OR-matched against the
+   *  native screen / route name. screen_names is the target set. */
   screen_match?: MatchOp;
-  screen_name?: string;
+  screen_names?: string[];
   event_name?: string;
   event_min_count?: number;
   event_window_days?: number;
