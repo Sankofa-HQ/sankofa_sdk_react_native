@@ -204,12 +204,39 @@ export class SankofaPulse {
   }
 
   /**
-   * Stub for the future "list surveys eligible for this user"
-   * endpoint. Returns an empty list until we ship the
-   * SDK-readable survey list path.
+   * List every published survey the API key's project owns AND
+   * whose targeting rules pass for the current respondent. Server
+   * returns the lightweight summary + targeting rules; the SDK
+   * runs the local eligibility evaluator (mirrors server-side Go
+   * evaluator byte-for-byte) so sampling + frequency-cap math
+   * agrees across client + server.
    */
-  async getActiveMatchingSurveys(): Promise<Survey[]> {
-    return [];
+  async getActiveMatchingSurveys(
+    options: PulseShowOptions = {},
+  ): Promise<Survey[]> {
+    const client = this.makeClient();
+    const summaries = await client.listSurveys();
+    const externalId =
+      options.respondent?.external_id ??
+      options.respondent?.user_id ??
+      this.resolveExternalId();
+    const out: Survey[] = [];
+    for (const s of summaries) {
+      const decision = evaluate(
+        s.targeting_rules,
+        this.buildContext(s.id, externalId, options),
+      );
+      if (!decision.eligible) continue;
+      out.push({
+        id: s.id,
+        name: s.name,
+        description: s.description ?? '',
+        kind: s.kind,
+        status: s.status,
+        slug: s.slug,
+      } as Survey);
+    }
+    return out;
   }
 
   /** Read-only access for the modal renderer. */

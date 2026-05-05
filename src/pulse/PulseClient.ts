@@ -6,8 +6,19 @@
 import type {
   AnswerState,
   SubmitPayload,
+  Survey,
   SurveyBundle,
+  TargetingRule,
 } from './PulseTypes';
+
+/** Compact projection returned by GET /api/pulse/surveys. */
+export type PulseSurveySummary = Pick<
+  Survey,
+  'id' | 'name' | 'description' | 'kind' | 'status'
+> & {
+  slug?: string;
+  targeting_rules: TargetingRule[];
+};
 
 export interface PulseClientOptions {
   endpoint: string;
@@ -72,6 +83,34 @@ export class PulseClient {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  }
+
+  /**
+   * Discover every published survey the API key's project owns.
+   * Each summary carries the targeting_rules so callers can run
+   * local eligibility evaluation without a per-survey round-trip.
+   * Powers `getActiveMatchingSurveys()`. Returns [] on a 404 so the
+   * SDK keeps working against older engines that haven't shipped
+   * this endpoint yet.
+   */
+  async listSurveys(): Promise<PulseSurveySummary[]> {
+    try {
+      const body = await this.fetchJson<{
+        surveys?: PulseSurveySummary[];
+      }>('/api/pulse/surveys');
+      return (body.surveys ?? []).map((s) => ({
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        kind: s.kind,
+        status: s.status,
+        slug: s.slug,
+        targeting_rules: s.targeting_rules ?? [],
+      }));
+    } catch (err) {
+      if (err instanceof Error && /HTTP 404/.test(err.message)) return [];
+      throw err;
+    }
   }
 
   async deletePartial(surveyId: string, externalId: string): Promise<void> {
