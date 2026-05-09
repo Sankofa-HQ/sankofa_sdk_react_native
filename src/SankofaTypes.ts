@@ -44,6 +44,41 @@ export interface SankofaInitConfig {
    * @default 50
    */
   batchSize?: number;
+
+  // ── Catch (Crashlytics + Sentry merged ergonomics) ────────────────
+  //
+  // When enabled (default), `Sankofa.initialize` auto-constructs the
+  // JS `SankofaCatch` singleton AND tells the native bridge to start
+  // its own native SankofaCatch — so JVM/NDK + iOS NSException/signal
+  // crashes flow into the same dashboard issue stream as JS errors.
+  // No more `new SankofaCatch(...)` boilerplate; the static helpers
+  // on the `Sankofa` object (`Sankofa.captureException`, `Sankofa.log`,
+  // etc.) reach the active singleton from anywhere.
+
+  /**
+   * Auto-start error + crash tracking.
+   * @default true
+   */
+  enableCatch?: boolean;
+
+  /**
+   * Environment label attached to every Catch event.
+   * @default 'live'
+   */
+  catchEnvironment?: 'live' | 'test';
+
+  /**
+   * Release identifier (e.g. `'myapp@1.4.2'`).  Forwarded to both the
+   * JS Catch singleton AND the native bridge so JS errors and native
+   * crashes share a single release dimension on the dashboard.
+   */
+  release?: string;
+
+  /**
+   * Optional app-version override.  Defaults to whatever the native
+   * device-info module reports.
+   */
+  appVersion?: string;
 }
 
 /**

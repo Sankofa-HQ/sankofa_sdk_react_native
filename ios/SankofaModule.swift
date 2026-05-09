@@ -101,6 +101,26 @@ public class SankofaModule: Module {
           captureScale:         config["captureScale"] as? CGFloat ?? 0.35
         )
         Sankofa.shared.initialize(apiKey: apiKey, config: cfg)
+
+        // ── Catch (rolled-up native auto-start) ──
+        // When the JS side passes `enableCatch: true` (the default) we
+        // boot SankofaCatch on the iOS side too.  Closes the "iOS
+        // NSException + POSIX-signal crashes under React Native don't
+        // reach the dashboard" gap — without this the native side stays
+        // dormant and only the JS-side ErrorUtils handler runs.
+        // Idempotent: `start()` re-applies its options without double-
+        // chaining the global exception handler.
+        let enableCatch = config["enableCatch"] as? Bool ?? true
+        if enableCatch {
+          let env = config["catchEnvironment"] as? String ?? "live"
+          let rel = config["catchRelease"] as? String
+          let ver = config["catchAppVersion"] as? String
+          _ = SankofaCatch.shared.start(
+            environment: env,
+            release:     rel,
+            appVersion:  ver
+          )
+        }
       }
     }
 

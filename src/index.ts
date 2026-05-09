@@ -2,6 +2,12 @@ import { Platform } from 'react-native';
 import SankofaNativeModule from './SankofaModule';
 import type { SankofaInitConfig, SankofaPersonTraits } from './SankofaTypes';
 import { markCoreInitialized, routeHandshake, getInstalledModules } from './core/ModuleRegistry';
+import { SankofaCatch } from './catch/SankofaCatch';
+import type {
+  Breadcrumb,
+  CaptureOptions,
+  UserContext as CatchUserContext,
+} from './catch/CatchTypes';
 
 // SankofaInitConfig is the canonical name for the init options; the old
 // `SankofaConfig` TYPE is now a deprecated alias kept inside
@@ -10,6 +16,8 @@ import { markCoreInitialized, routeHandshake, getInstalledModules } from './core
 // class below) has the identifier to itself.
 export type { SankofaInitConfig, SankofaPersonTraits } from './SankofaTypes';
 export { useSankofaScreen } from './hooks/useSankofaScreen';
+export { useSankofaNavigationTracking } from './hooks/useSankofaNavigationTracking';
+export type { SankofaNavigationContainerRef } from './hooks/useSankofaNavigationTracking';
 
 // Sankofa Deploy — OTA update module
 export { SankofaDeploy } from './deploy/SankofaDeploy';
@@ -244,7 +252,17 @@ export const Sankofa = {
     // can register without emitting the "created before initialize()" warning.
     markCoreInitialized();
 
-    // 1. Initialize native layer (sync — bridges to Swift/Kotlin)
+    // Phase A: Catch is rolled up into the parent SDK.  Defaults match
+    // the "Crashlytics on by default" expectation — hosts that want it
+    // OFF (custom transport, billing-tier downgrade) pass
+    // `enableCatch: false`.  The native bridge auto-starts its own
+    // native SankofaCatch when this is true so iOS NSException +
+    // POSIX-signal crashes and Android JVM + ANR crashes flow into
+    // the same dashboard stream as JS errors.
+    const enableCatch = config.enableCatch ?? true;
+    const catchEnvironment = config.catchEnvironment ?? 'live';
+
+    // 1. Initialize native layer (sync — bridges to Swift/Kotlin).
     SankofaNativeModule.initialize(apiKey, {
       endpoint,
       debug: config.debug ?? false,
@@ -253,7 +271,30 @@ export const Sankofa = {
       maskAllInputs: config.maskAllInputs ?? true,
       flushIntervalSeconds: config.flushIntervalSeconds ?? 30,
       batchSize: config.batchSize ?? 50,
+      enableCatch,
+      catchEnvironment,
+      catchRelease: config.release,
+      catchAppVersion: config.appVersion,
     });
+
+    // 2. Auto-construct the JS-side SankofaCatch singleton for JS
+    //    error capture (ErrorUtils + unhandled rejections).  The
+    //    native side handles native crashes independently — together
+    //    they cover the full Crashlytics surface area.  Idempotent —
+    //    if a host manually constructed one BEFORE initialize (legacy
+    //    boilerplate path) the singleton lock-in inside SankofaCatch
+    //    keeps that instance and we skip.
+    if (enableCatch && !SankofaCatch.instance) {
+      // eslint-disable-next-line no-new — constructor self-registers
+      // and self-installs handlers; we don't need the reference here
+      // because every consumer reads through `SankofaCatch.instance`
+      // or the static helpers on `Sankofa`.
+      new SankofaCatch({
+        environment: catchEnvironment,
+        release: config.release,
+        appVersion: config.appVersion,
+      });
+    }
 
     // 2. Call unified handshake (async — doesn't block initialization)
     // Reverse Handshake: we append `installed=core,deploy,...` so the
@@ -411,5 +452,104 @@ export const Sankofa = {
    */
   flush(): void {
     SankofaNativeModule.flush();
+  },
+
+  // ─────────────────────────────────────────────────────────────────
+  //  Catch helpers — Crashlytics + Sentry style.
+  // ─────────────────────────────────────────────────────────────────
+  //
+  // These delegate to the active `SankofaCatch` singleton (auto-
+  // constructed by `Sankofa.initialize({ enableCatch: true })`).
+  // Calls before initialize runs degrade to no-ops so host code never
+  // has to guard.
+  //
+  // Why they're on the `Sankofa` object: this is the API surface the
+  // host should reach for from anywhere — `Sankofa.captureException(err)`
+  // from a deeply nested screen, no `getSankofaCatch()` getter
+  // pattern, no setter at app root.  The full instance API
+  // (`SankofaCatch.instance!.foo`) stays available for advanced users.
+
+  /**
+   * Record a handled exception with optional metadata.
+   *
+   * Uncaught errors are captured automatically — only call this when
+   * you caught an error yourself but still want it reported (e.g.
+   * inside a `try/catch` that recovered gracefully but should log).
+   * Returns the event id ('' when Catch isn't initialized).
+   */
+  captureException(err: unknown, options: CaptureOptions = {}): string {
+    return SankofaCatch.instance?.captureException(err, options) ?? '';
+  },
+
+  /**
+   * Record a free-form message as a standalone Catch event.
+   *
+   * Use for "interesting non-error" reports where you want a billable
+   * event (e.g. "payment retry exhausted").  For pure "log this
+   * breadcrumb" use [log] instead — it's free.
+   */
+  captureMessage(message: string, options: CaptureOptions = {}): string {
+    return SankofaCatch.instance?.captureMessage(message, options) ?? '';
+  },
+
+  /**
+   * Crashlytics-style structured log.  Adds a breadcrumb that rides
+   * on the next captured event.  Free — doesn't bill — use liberally
+   * to narrate user activity ("entered checkout", "tapped pay").
+   * Mirrors `FirebaseCrashlytics.log(msg)`.
+   */
+  log(message: string, category?: string): void {
+    SankofaCatch.instance?.log(message, category);
+  },
+
+  /**
+   * Identify the user.  Sticky — pass `null` to clear (e.g. on logout).
+   */
+  setUser(user: CatchUserContext | null): void {
+    SankofaCatch.instance?.setUser(user);
+  },
+
+  /**
+   * Attach a single tag to every subsequent event.  Sticky — call
+   * again with a new value to update.
+   */
+  setTag(key: string, value: string): void {
+    SankofaCatch.instance?.setTags({ [key]: value });
+  },
+
+  /**
+   * Attach multiple tags at once.  Sticky.
+   */
+  setTags(tags: Record<string, string>): void {
+    SankofaCatch.instance?.setTags(tags);
+  },
+
+  /**
+   * Attach an arbitrary contextual value to every subsequent event.
+   * Sticky.  Use for non-string context (numbers, lists, maps) that
+   * doesn't fit the tag shape.
+   */
+  setExtra(key: string, value: unknown): void {
+    SankofaCatch.instance?.setExtra(key, value);
+  },
+
+  /**
+   * Push a custom breadcrumb.  Auto-captured ones (console, fetch)
+   * already flow without this; reach for it when you want a
+   * structured marker like `addBreadcrumb({ category: 'auth',
+   * message: 'token refreshed' })`.
+   */
+  addBreadcrumb(crumb: Omit<Breadcrumb, 'ts_ms'> & { ts_ms?: number }): void {
+    SankofaCatch.instance?.addBreadcrumb(crumb);
+  },
+
+  /**
+   * Force a flush of any pending Catch events.  No-op when Catch
+   * isn't initialised.
+   */
+  async flushCatch(): Promise<void> {
+    const c = SankofaCatch.instance;
+    if (!c) return;
+    await c.flush();
   },
 };

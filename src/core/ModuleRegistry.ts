@@ -102,6 +102,18 @@ export function hasModule(name: SankofaModuleName): boolean {
 }
 
 /**
+ * Returns the registered module instance for [name], or undefined when
+ * no module of that kind is installed.  Lets sibling modules
+ * introspect each other at runtime — `SankofaCatch` reads `SankofaSwitch` +
+ * `SankofaConfig` here at capture time so the dashboard can show
+ * "what flags + config values were live when this error fired" without
+ * the host wiring closures by hand.
+ */
+export function getModule(name: SankofaModuleName): SankofaModule | undefined {
+  return REGISTERED.get(name);
+}
+
+/**
  * Returns the list of module names the app binary actually ships with.
  * Analytics is always present (it IS the core). Deploy/Catch are
  * reported only if they've been registered.

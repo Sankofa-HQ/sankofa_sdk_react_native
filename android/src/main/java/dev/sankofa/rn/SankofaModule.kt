@@ -63,6 +63,11 @@ class SankofaModule : Module() {
         android.util.Log.w("SankofaModule", "Sankofa: applicationContext unavailable — initialize() skipped.")
         return@Function
       }
+      // Catch (Crashlytics + Sentry merged) — forwarded into SankofaConfig
+      // so the parent SDK's auto-start path is the single boot point.
+      // The bridge no longer calls `SankofaCatch.init(...)` directly; that
+      // path used to double-install the ANR watcher + flusher when the
+      // JS layer also called `Sankofa.initialize`.
       val sdkConfig = SankofaConfig(
         endpoint            = config["endpoint"] as? String ?: "https://api.sankofa.dev",
         debug               = config["debug"] as? Boolean ?: false,
@@ -71,6 +76,10 @@ class SankofaModule : Module() {
         maskAllInputs       = config["maskAllInputs"] as? Boolean ?: true,
         flushIntervalSeconds= (config["flushIntervalSeconds"] as? Number)?.toInt() ?: 30,
         batchSize           = (config["batchSize"] as? Number)?.toInt() ?: 50,
+        enableCatch         = config["enableCatch"] as? Boolean ?: true,
+        catchEnvironment    = config["catchEnvironment"] as? String ?: "live",
+        release             = config["catchRelease"] as? String,
+        appVersion          = config["catchAppVersion"] as? String,
       )
       runOnMain {
         Sankofa.init(context = ctx, apiKey = apiKey, config = sdkConfig)

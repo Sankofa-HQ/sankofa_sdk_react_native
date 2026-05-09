@@ -1,7 +1,7 @@
 import { Platform } from 'react-native';
 import { getSharedApiKey, getSharedEndpoint } from '../index';
 import type { SankofaModule } from '../core/ModuleRegistry';
-import { registerModule } from '../core/ModuleRegistry';
+import { getModule, registerModule } from '../core/ModuleRegistry';
 
 import SankofaNativeModule from '../SankofaModule';
 import { CatchBreadcrumbsAutocapture, CatchBreadcrumbsBuffer } from './CatchBreadcrumbs';
@@ -77,6 +77,21 @@ export interface SankofaCatchOptions {
 export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
   readonly name = 'catch' as const;
 
+  /**
+   * Singleton accessor for the active Catch instance.  Set the first
+   * time `SankofaCatch` is constructed (typically during
+   * `Sankofa.initialize({ enableCatch: true })`).  The static helpers
+   * on the public `Sankofa` object — `Sankofa.captureException`,
+   * `Sankofa.log`, etc. — read this so host code never needs to
+   * thread a `getSankofaCatch()` getter through every screen.
+   * Returns null when Catch was disabled at init or `initialize()`
+   * hasn't run yet — the helpers all degrade to no-ops in that case.
+   */
+  private static _instance: SankofaCatch | null = null;
+  static get instance(): SankofaCatch | null {
+    return SankofaCatch._instance;
+  }
+
   private transport: CatchTransport | null = null;
   private buffer = new CatchBreadcrumbsBuffer(100);
   private autocapture: CatchBreadcrumbsAutocapture;
@@ -105,6 +120,14 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
   private errorSampleRate = 1.0;
 
   constructor(options: SankofaCatchOptions = {}) {
+    // Static singleton lock-in.  First instance wins so multiple
+    // accidental constructions (hot reload, nested test setup) don't
+    // shadow each other.  Hosts that genuinely need a fresh instance
+    // call [shutdown] first to clear it.
+    if (!SankofaCatch._instance) {
+      SankofaCatch._instance = this;
+    }
+
     this.environment = options.environment ?? 'live';
     this.release = options.release;
     this.appVersion = options.appVersion;
@@ -185,6 +208,26 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
 
   setExtra(key: string, value: unknown): void {
     this.extra[key] = value;
+  }
+
+  /**
+   * Crashlytics-style structured log.
+   *
+   * Adds an entry to the in-memory breadcrumb ring buffer that rides
+   * on the next captured event — perfect for narrating user activity
+   * ("entered checkout", "tapped pay") so when a crash fires the
+   * dashboard shows the lead-up.  Does NOT emit a billable event on
+   * its own; pair with [captureException] / [captureMessage] when you
+   * want a standalone event.  Mirrors `FirebaseCrashlytics.log(msg)`
+   * and `Sentry.addBreadcrumb({ category: 'log', ... })`.
+   */
+  log(message: string, category?: string): void {
+    this.buffer.push({
+      type: 'log',
+      category: category ?? 'log',
+      message,
+      level: 'info',
+    });
   }
 
   async flush(): Promise<void> {
@@ -269,8 +312,8 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
 
       breadcrumbs: this.buffer.snapshot(),
       fingerprint: options.fingerprint,
-      flag_snapshot: this.readFlagSnapshot?.(),
-      config_snapshot: this.readConfigSnapshot?.(),
+      flag_snapshot: this.readFlagSnapshot?.() ?? this.autoFlagSnapshot(),
+      config_snapshot: this.readConfigSnapshot?.() ?? this.autoConfigSnapshot(),
       trace_id: options.contexts?.trace?.trace_id,
       span_id: options.contexts?.trace?.span_id,
     };
@@ -294,6 +337,65 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
   }
 
   /**
+   * Auto-discover the active feature-flag decisions by introspecting
+   * the registered `SankofaSwitch`.  Lets every captured event carry
+   * the live flag state without the host wiring a closure by hand.
+   * Returns undefined when no Switch module is registered or when
+   * the snapshot would be empty.
+   *
+   * Typed structurally — we duck-type the methods we need (`getAllKeys`,
+   * `getDecision`) so this file doesn't take a hard import on the
+   * Switch module (which would couple the bundle even when Switch
+   * isn't used).
+   */
+  private autoFlagSnapshot(): Record<string, string> | undefined {
+    const mod = getModule('switch') as
+      | undefined
+      | {
+          getAllKeys?: () => string[];
+          getDecision?: (k: string) => {
+            variant?: string;
+            value?: unknown;
+          } | null;
+        };
+    if (!mod || typeof mod.getAllKeys !== 'function' || typeof mod.getDecision !== 'function') {
+      return undefined;
+    }
+    const out: Record<string, string> = {};
+    for (const key of mod.getAllKeys()) {
+      const dec = mod.getDecision(key);
+      if (!dec) continue;
+      const variant = dec.variant && dec.variant.length > 0 ? dec.variant : null;
+      out[key] = variant ?? String(dec.value);
+    }
+    return Object.keys(out).length === 0 ? undefined : out;
+  }
+
+  /**
+   * Same as [autoFlagSnapshot] but for the registered `SankofaConfig`
+   * remote-config module.  Reads the active value for every key the
+   * host passed into the Config defaults map.
+   */
+  private autoConfigSnapshot(): Record<string, unknown> | undefined {
+    const mod = getModule('config') as
+      | undefined
+      | {
+          getAllKeys?: () => string[];
+          getDecision?: <V>(k: string) => { value?: V } | null;
+        };
+    if (!mod || typeof mod.getAllKeys !== 'function' || typeof mod.getDecision !== 'function') {
+      return undefined;
+    }
+    const out: Record<string, unknown> = {};
+    for (const key of mod.getAllKeys()) {
+      const dec = mod.getDecision(key);
+      if (!dec || dec.value === undefined) continue;
+      out[key] = dec.value;
+    }
+    return Object.keys(out).length === 0 ? undefined : out;
+  }
+
+  /**
    * Teardown — called when the host app wants to stop Catch without
    * tearing down the whole Sankofa SDK. Uninstalls handlers, stops
    * the autocapture wrappers, and cancels the periodic flush timer.
@@ -304,6 +406,13 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
     this.autocapture.uninstall();
     this.transport?.shutdown();
     this.transport = null;
+    // Clear the singleton only if THIS instance was the one registered
+    // — guards against the "two-instance hot-reload" case where
+    // shutting down a stale instance would otherwise null out the
+    // active one.
+    if (SankofaCatch._instance === this) {
+      SankofaCatch._instance = null;
+    }
   }
 }
 

@@ -454,7 +454,7 @@ export class SankofaDeploy implements SankofaModule {
         await this.storage.setCurrentLabel('');
         await this.storage.setCurrentBundlePath(null);
         try {
-          SankofaNativeModule.deployClearBundle();
+          SankofaNativeModule.deployClearBundle?.();
         } catch {}
       }
       await this.storage.setCrashCount(0);
@@ -573,7 +573,7 @@ export class SankofaDeploy implements SankofaModule {
             await this.storage.setCurrentLabel('');
             await this.storage.setCurrentBundlePath(null);
             try {
-              SankofaNativeModule.deployClearBundle();
+              SankofaNativeModule.deployClearBundle?.();
             } catch {}
           }
           await this.storage.setCrashCount(0);
@@ -633,7 +633,15 @@ export class SankofaDeploy implements SankofaModule {
     if (!update.downloadUrl || !update.sha256) return null;
 
     try {
-      // Call the native bridge to download, decompress, and SHA256-verify
+      // Call the native bridge to download, decompress, and SHA256-verify.
+      // Guard against very old native binaries where the function isn't
+      // registered yet — surfaces a clear error instead of "undefined is
+      // not a function" deep in the OTA pipeline.
+      if (typeof SankofaNativeModule.deployDownloadBundle !== 'function') {
+        throw new Error(
+          'SankofaDeploy requires native bridge >= 0.1 — please rebuild the host app',
+        );
+      }
       const localPath: string = await SankofaNativeModule.deployDownloadBundle(
         update.downloadUrl,
         update.sha256,
@@ -670,7 +678,7 @@ export class SankofaDeploy implements SankofaModule {
     // otherwise falls back to activity recreation (Android) or
     // RCTBridge reload notification (iOS).
     try {
-      SankofaNativeModule.deployReload();
+      SankofaNativeModule.deployReload?.();
     } catch (err) {
       console.error('[SankofaDeploy] Reload failed:', err);
     }
@@ -769,10 +777,14 @@ export class SankofaDeploy implements SankofaModule {
   private async _getDeviceInfo(): Promise<{ osVersion?: string; deviceModel?: string; locale?: string }> {
     try {
       if (typeof SankofaNativeModule.deployGetDeviceInfo === 'function') {
+        // Bridge always returns camelCase keys (`osVersion`, `deviceModel`,
+        // `locale`) — both the iOS and Android modules are typed that way.
+        // Earlier code defensively fell back to snake_case, but that path
+        // was unreachable and was masking a real type contract.
         const info = await SankofaNativeModule.deployGetDeviceInfo();
         return {
-          osVersion: info?.osVersion || info?.os_version,
-          deviceModel: info?.deviceModel || info?.device_model,
+          osVersion: info?.osVersion,
+          deviceModel: info?.deviceModel,
           locale: info?.locale,
         };
       }
