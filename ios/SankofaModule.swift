@@ -90,6 +90,12 @@ public class SankofaModule: Module {
 
     Function("initialize") { (apiKey: String, config: [String: Any?]) in
       DispatchQueue.main.async {
+        // Catch (Crashlytics + Sentry merged) — forwarded into
+        // SankofaConfig so the parent SDK's auto-start path is the
+        // single boot point. The bridge no longer calls
+        // `SankofaCatch.shared.start(...)` directly; that path used to
+        // double-install the flush timer when the JS layer also called
+        // `Sankofa.initialize`.
         let cfg = SankofaConfig(
           endpoint:             config["endpoint"] as? String ?? "https://api.sankofa.dev",
           debug:                config["debug"] as? Bool ?? false,
@@ -98,29 +104,13 @@ public class SankofaModule: Module {
           batchSize:            config["batchSize"] as? Int ?? 50,
           recordSessions:       config["recordSessions"] as? Bool ?? true,
           maskAllInputs:        config["maskAllInputs"] as? Bool ?? true,
-          captureScale:         config["captureScale"] as? CGFloat ?? 0.35
+          captureScale:         config["captureScale"] as? CGFloat ?? 0.35,
+          enableCatch:          config["enableCatch"] as? Bool ?? true,
+          catchEnvironment:     config["catchEnvironment"] as? String ?? "live",
+          release:              config["catchRelease"] as? String,
+          appVersion:           config["catchAppVersion"] as? String
         )
         Sankofa.shared.initialize(apiKey: apiKey, config: cfg)
-
-        // ── Catch (rolled-up native auto-start) ──
-        // When the JS side passes `enableCatch: true` (the default) we
-        // boot SankofaCatch on the iOS side too.  Closes the "iOS
-        // NSException + POSIX-signal crashes under React Native don't
-        // reach the dashboard" gap — without this the native side stays
-        // dormant and only the JS-side ErrorUtils handler runs.
-        // Idempotent: `start()` re-applies its options without double-
-        // chaining the global exception handler.
-        let enableCatch = config["enableCatch"] as? Bool ?? true
-        if enableCatch {
-          let env = config["catchEnvironment"] as? String ?? "live"
-          let rel = config["catchRelease"] as? String
-          let ver = config["catchAppVersion"] as? String
-          _ = SankofaCatch.shared.start(
-            environment: env,
-            release:     rel,
-            appVersion:  ver
-          )
-        }
       }
     }
 
