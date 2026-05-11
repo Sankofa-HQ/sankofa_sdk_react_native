@@ -1,6 +1,6 @@
 # sankofa-react-native
 
-> **Sankofa Analytics SDK for React Native** — event tracking, heatmaps, and session replay, powered by the native iOS & Android Sankofa SDKs.
+> **Sankofa SDK for React Native** — analytics, error tracking (Crashlytics + Sentry merged), feature flags, remote config, OTA updates, in-app surveys, heatmaps, and session replay. Wraps the native iOS & Android Sankofa SDKs through Expo Modules.
 
 ---
 
@@ -22,35 +22,79 @@ yarn add sankofa-react-native
 
 ### 1. Initialize (once, at app root)
 
+One line — Catch auto-installs on both JS and native sides. JS errors AND iOS NSException / Android JVM-uncaught all flow through `Sankofa.captureException`.
+
 ```tsx
 // app/_layout.tsx
 import { Sankofa } from 'sankofa-react-native';
 
 Sankofa.initialize('YOUR_API_KEY', {
-  endpoint: 'https://api.sankofa.dev', // optional
+  endpoint: 'https://api.sankofa.dev',
   recordSessions: true,
   debug: __DEV__,
+  // Catch (defaults shown — enableCatch is true by default).
+  enableCatch: true,
+  catchEnvironment: 'production',
+  release: 'myapp@1.4.0',
+  // Optional Sentry-style hook to scrub PII / drop noise.
+  beforeSend: (event) => {
+    if (event.message?.includes('ResizeObserver loop limit')) return null;
+    return event;
+  },
 });
 ```
 
-### 2. Tag screens with the hook
+### 2. Tag screens
+
+Two patterns — pick one:
 
 ```tsx
-import { useSankofaScreen, Sankofa } from 'sankofa-react-native';
+// Pattern A — per-screen hook (Expo Router-friendly)
+import { useSankofaScreen } from 'sankofa-react-native';
 
-const CheckoutScreen = () => {
-  // 🚀 Automatically tags the screen context for heatmaps
+function CheckoutScreen() {
   useSankofaScreen('Checkout');
+  // ...
+}
+```
 
+```tsx
+// Pattern B — auto-tag every screen from @react-navigation/native
+import { NavigationContainer, useNavigationContainerRef } from '@react-navigation/native';
+import { useSankofaNavigationTracking } from 'sankofa-react-native';
+
+export default function App() {
+  const navRef = useNavigationContainerRef();
+  useSankofaNavigationTracking(navRef);
   return (
-    <View>
-      <Button
-        onPress={() => Sankofa.track('pay_clicked')}
-        title="Pay"
-      />
-    </View>
+    <NavigationContainer ref={navRef}>
+      <RootStack />
+    </NavigationContainer>
   );
-};
+}
+```
+
+### 3. Capture errors
+
+```tsx
+import { Sankofa } from 'sankofa-react-native';
+
+// Capture handled exceptions from anywhere
+try {
+  await chargeCard(amount);
+} catch (err) {
+  Sankofa.captureException(err);
+}
+
+// Crashlytics-style breadcrumb log — rides on next capture, doesn't bill.
+Sankofa.log('checkout: applying coupon SUMMER25');
+
+// Sentry-style temporary scope
+Sankofa.withScope((scope) => {
+  scope.setTag('checkout_step', 'payment');
+  scope.setLevel('warning');
+  Sankofa.captureException(err);
+});
 ```
 
 ---
@@ -58,22 +102,38 @@ const CheckoutScreen = () => {
 ## API Reference
 
 | Method | Description |
-|--------|-------------|
-| `Sankofa.initialize(apiKey, config?)` | Initialize the SDK at app start. |
-| `useSankofaScreen(name)` | Hook — tags the current screen for contextual heatmaps. |
+|---|---|
+| `Sankofa.initialize(apiKey, config?)` | Initialize SDK + JS-side Catch + native iOS/Android Catch bridges. |
 | `Sankofa.track(event, props?)` | Track custom events. `$screen_name` is auto-injected. |
 | `Sankofa.identify(userId)` | Link anonymous session to a known user. |
-| `Sankofa.setPerson(traits)` | Set profile attributes (`name`, `email`, etc.). |
+| `Sankofa.setPerson(traits)` | Set profile attributes. |
 | `Sankofa.reset()` | Clear identity & start a fresh session (logout). |
+| `Sankofa.flush()` | Force-drain analytics queue. |
+| `useSankofaScreen(name)` | Per-screen hook — tags the current screen on mount. |
+| `useSankofaNavigationTracking(navRef)` | App-shell hook — auto-tags every React Navigation screen change. |
+| **Catch — Crashlytics + Sentry merged** | |
+| `Sankofa.captureException(err, opts?)` | Capture a handled exception. |
+| `Sankofa.captureMessage(msg, opts?)` | Non-error event. |
+| `Sankofa.log(msg, category?)` | Crashlytics-style breadcrumb. Doesn't bill. |
+| `Sankofa.setUser` / `setTag(s)` / `setExtra` / `addBreadcrumb` | Ambient context. |
+| `Sankofa.withScope(fn)` | Temporary scope overlay. |
+| `Sankofa.flushCatch()` | Force-flush Catch events. |
+| **Switch / Config / Pulse / Deploy** | |
+| `new SankofaSwitch({...})` | Construct a flag client. |
+| `new SankofaConfig({...})` | Construct a remote-config client. |
+| `new SankofaPulse({...})` | Construct a Pulse survey client. |
+| `new SankofaDeploy({...})` | Construct an OTA / Deploy client. |
 
 ---
 
 ## Native Linking
 
-This package follows standard React Native autolinking. 
+Standard React Native autolinking.
 
-- **iOS**: Uses CocoaPods. Run `pod install` in your `ios/` directory (or `npx expo run:ios`).
-- **Android**: Uses Gradle. Dependencies are resolved automatically via Maven Central.
+- **iOS**: CocoaPods. Run `pod install` in `ios/` (or `npx expo run:ios`).
+- **Android**: Gradle. Dependencies resolve automatically via Maven Central.
+
+---
 
 ## Sankofa Deploy
 
@@ -82,38 +142,18 @@ Push OTA JavaScript updates to your users without going through the App Store. U
 ```tsx
 import { Sankofa, SankofaDeploy } from 'sankofa-react-native';
 
-Sankofa.initialize('sk_live_...', {
-  endpoint: 'https://api.sankofa.dev',
-});
+Sankofa.initialize('sk_live_...', { endpoint: 'https://api.sankofa.dev' });
 
 const deploy = new SankofaDeploy();
-
 deploy.checkForUpdate().then((update) => {
-  if (update.updateAvailable) {
-    deploy.downloadAndApply(update);
-  }
-});
-```
-
-Optional test overrides:
-
-```tsx
-const deploy = new SankofaDeploy({
-  appVersion: '1.4.2',
-  distinctId: 'device-or-user-id',
+  if (update.updateAvailable) deploy.downloadAndApply(update);
 });
 ```
 
 ### Expo Prebuild
 
-Add the config plugin, then run prebuild:
-
 ```json
-{
-  "expo": {
-    "plugins": ["sankofa-react-native"]
-  }
-}
+{ "expo": { "plugins": ["sankofa-react-native"] } }
 ```
 
 ```bash
@@ -122,13 +162,17 @@ npx expo prebuild
 
 ### Bare React Native
 
-For bare React Native projects (without Expo), run the CLI setup command to automatically patch your native files:
-
 ```bash
 sankofa init
 ```
 
-This adds the OTA bundle provider to `MainApplication.kt` and `AppDelegate.swift`. If auto-patching fails, the CLI prints the exact code to add manually.
+Adds the OTA bundle provider to `MainApplication.kt` and `AppDelegate.swift`. If auto-patching fails, the CLI prints the exact code to add manually.
+
+---
+
+## Documentation
+
+Full API reference and integration guides: [docs.sankofa.dev/sdks/react-native](https://docs.sankofa.dev/sdks/react-native/overview).
 
 ---
 
