@@ -9,6 +9,7 @@ import { installGlobalHandlers, type InstalledHandlers } from './CatchHandlers';
 import { errorToException } from './CatchStackParser';
 import { CatchTransport } from './CatchTransport';
 import type {
+  BeforeSendFn,
   Breadcrumb,
   CaptureOptions,
   CatchEvent,
@@ -16,9 +17,65 @@ import type {
   DeviceContext,
   Level,
   SankofaCatchAPI,
+  SankofaCatchScope,
   UserContext,
 } from './CatchTypes';
 import { WireVersionCurrent } from './CatchTypes';
+
+/**
+ * Internal scope implementation. Mutations layer onto the next
+ * captured event inside the `withScope` closure that pushed this
+ * scope onto the stack.
+ */
+class CatchScope implements SankofaCatchScope {
+  tags: Record<string, string> = {};
+  extra: Record<string, unknown> = {};
+  user: UserContext | null = null;
+  userTouched = false;
+  level: Level | undefined;
+  fingerprint: string[] | undefined;
+
+  setTag(key: string, value: string): this {
+    this.tags[key] = value;
+    return this;
+  }
+  setTags(tags: Record<string, string>): this {
+    this.tags = { ...this.tags, ...tags };
+    return this;
+  }
+  setExtra(key: string, value: unknown): this {
+    this.extra[key] = value;
+    return this;
+  }
+  setUser(user: UserContext | null): this {
+    this.user = user;
+    this.userTouched = true;
+    return this;
+  }
+  setLevel(level: Level): this {
+    this.level = level;
+    return this;
+  }
+  setFingerprint(fingerprint: string[]): this {
+    this.fingerprint = fingerprint;
+    return this;
+  }
+
+  /** Layer this scope on top of caller `options` (caller wins). */
+  applyTo(options: CaptureOptions): CaptureOptions {
+    return {
+      level: options.level ?? this.level,
+      tags: { ...this.tags, ...(options.tags ?? {}) },
+      extra: { ...this.extra, ...(options.extra ?? {}) },
+      // User: caller wins, then scope. `userTouched` distinguishes
+      // "scope explicitly cleared user with setUser(null)" from
+      // "scope never set user".
+      user: options.user ?? (this.userTouched ? (this.user ?? undefined) : undefined),
+      fingerprint: options.fingerprint ?? this.fingerprint,
+      contexts: options.contexts,
+    };
+  }
+}
 
 /**
  * Sankofa Catch — error tracking for React Native. Construct once
@@ -55,6 +112,16 @@ export interface SankofaCatchOptions {
   readFlagSnapshot?: () => Record<string, string> | undefined;
   /** Optional reader for the current config values — attached to every event. */
   readConfigSnapshot?: () => Record<string, unknown> | undefined;
+  /**
+   * Synchronous hook called AFTER an event has been composed but
+   * BEFORE the transport sends it. Return the (possibly modified)
+   * event to ship it; return `null` to drop it entirely. Use for PII
+   * scrubbing, noise filtering, or late tag enrichment.
+   *
+   * Throws are swallowed — a host hook can never block the capture
+   * pipeline.
+   */
+  beforeSend?: BeforeSendFn;
 
   /**
    * Optional identity supplier called at capture time. Host apps
@@ -115,6 +182,14 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
   private tags: Record<string, string> = {};
   private extra: Record<string, unknown> = {};
 
+  // Phase B — temporary scopes pushed by withScope(). The top scope
+  // layers onto every capture inside the closure that pushed it.
+  private readonly scopeStack: CatchScope[] = [];
+
+  // Phase B — synchronous hook called before the transport sees the
+  // event. Set via the constructor options.
+  private readonly beforeSend?: BeforeSendFn;
+
   // Handshake-driven.
   private enabled = true;
   private errorSampleRate = 1.0;
@@ -134,6 +209,7 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
     this.readFlagSnapshot = options.readFlagSnapshot;
     this.readConfigSnapshot = options.readConfigSnapshot;
     this.readIdentity = options.readIdentity;
+    this.beforeSend = options.beforeSend;
 
     this.autocapture = new CatchBreadcrumbsAutocapture({
       buffer: this.buffer,
@@ -202,12 +278,33 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
     this.user = user;
   }
 
+  setTag(key: string, value: string): void {
+    this.tags = { ...this.tags, [key]: value };
+  }
+
   setTags(tags: Record<string, string>): void {
     this.tags = { ...this.tags, ...tags };
   }
 
   setExtra(key: string, value: unknown): void {
     this.extra[key] = value;
+  }
+
+  /**
+   * Run `fn` with a fresh scope. Mutations made via the scope
+   * (tags, extras, user, level, fingerprint) overlay onto any
+   * `captureException` / `captureMessage` calls inside `fn`. Outside
+   * `fn` the scope is gone — async captures deferred past `fn`'s
+   * return will NOT see the scope.
+   */
+  withScope<T>(fn: (scope: SankofaCatchScope) => T): T {
+    const scope = new CatchScope();
+    this.scopeStack.push(scope);
+    try {
+      return fn(scope);
+    } finally {
+      this.scopeStack.pop();
+    }
   }
 
   /**
@@ -251,11 +348,20 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
   private capture(
     errOrMessage: unknown,
     type: CatchEvent['type'],
-    options: CaptureOptions,
+    optionsIn: CaptureOptions,
     mechanism: { mechanismType?: string; handled?: boolean } = {},
   ): string {
     if (!this.enabled || !this.transport) return '';
     if (!this.shouldSample()) return '';
+
+    // Apply active withScope() overlay (if any). Layering order:
+    //   global setUser/setTags/setExtra (read below)
+    //   → top-of-stack scope (applyTo here)
+    //   → caller-supplied options (already merged in by applyTo)
+    const scope = this.scopeStack.length > 0
+      ? this.scopeStack[this.scopeStack.length - 1]
+      : null;
+    const options: CaptureOptions = scope ? scope.applyTo(optionsIn) : optionsIn;
 
     const level: Level = options.level ?? (type === 'console_error' ? 'warning' : 'error');
 
@@ -318,8 +424,26 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
       span_id: options.contexts?.trace?.span_id,
     };
 
-    this.transport.push(event);
-    return eventId;
+    // beforeSend hook — host gets final say. A null return drops the
+    // event; a thrown error is treated as "pass through unchanged"
+    // because losing telemetry from a buggy hook is worse than the
+    // hook misbehaving.
+    let outgoing: CatchEvent | null = event;
+    if (this.beforeSend) {
+      try {
+        outgoing = this.beforeSend(event);
+      } catch (err) {
+        if (__DEV__) {
+          // eslint-disable-next-line no-console
+          console.warn('[Sankofa Catch] beforeSend threw — sending original event', err);
+        }
+        outgoing = event;
+      }
+    }
+    if (!outgoing) return '';
+
+    this.transport.push(outgoing);
+    return outgoing.event_id;
   }
 
   private shouldSample(): boolean {

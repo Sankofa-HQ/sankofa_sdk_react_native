@@ -205,12 +205,45 @@ export interface CaptureOptions {
   };
 }
 
+/**
+ * Synchronous hook called after an event has been composed but BEFORE
+ * the SDK enqueues it for transport. Return the (possibly modified)
+ * event to ship it; return `null` to drop it entirely.
+ *
+ * Use cases:
+ *   - PII scrubbing (strip `event.user?.email`)
+ *   - Noise filtering (drop ResizeObserver loop errors, framework
+ *     setState-in-render warnings, etc.)
+ *   - Late tag enrichment
+ *
+ * Throwing inside the hook is treated like returning the event
+ * unchanged — a host bug must never block the capture pipeline.
+ */
+export type BeforeSendFn = (event: CatchEvent) => CatchEvent | null;
+
+/**
+ * Sentry-style temporary scope. Mutations made via the callback in
+ * `Sankofa.withScope(fn)` overlay onto the next captured event without
+ * polluting the global scope set via `setUser` / `setTags` / `setExtra`.
+ */
+export interface SankofaCatchScope {
+  setTag(key: string, value: string): SankofaCatchScope;
+  setTags(tags: Record<string, string>): SankofaCatchScope;
+  setExtra(key: string, value: unknown): SankofaCatchScope;
+  setUser(user: UserContext | null): SankofaCatchScope;
+  setLevel(level: Level): SankofaCatchScope;
+  setFingerprint(fingerprint: string[]): SankofaCatchScope;
+}
+
 export interface SankofaCatchAPI {
   captureException(err: unknown, options?: CaptureOptions): string;
   captureMessage(message: string, options?: CaptureOptions): string;
   addBreadcrumb(crumb: Omit<Breadcrumb, 'ts_ms'> & { ts_ms?: number }): void;
+  log(message: string, category?: string): void;
   setUser(user: UserContext | null): void;
+  setTag(key: string, value: string): void;
   setTags(tags: Record<string, string>): void;
   setExtra(key: string, value: unknown): void;
+  withScope<T>(fn: (scope: SankofaCatchScope) => T): T;
   flush(): Promise<void>;
 }

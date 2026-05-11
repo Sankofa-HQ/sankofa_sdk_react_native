@@ -293,6 +293,7 @@ export const Sankofa = {
         environment: catchEnvironment,
         release: config.release,
         appVersion: config.appVersion,
+        beforeSend: config.beforeSend,
       });
     }
 
@@ -511,10 +512,11 @@ export const Sankofa = {
 
   /**
    * Attach a single tag to every subsequent event.  Sticky — call
-   * again with a new value to update.
+   * again with a new value to update.  For per-event scoping use
+   * [withScope] instead.
    */
   setTag(key: string, value: string): void {
-    SankofaCatch.instance?.setTags({ [key]: value });
+    SankofaCatch.instance?.setTag(key, value);
   },
 
   /**
@@ -541,6 +543,38 @@ export const Sankofa = {
    */
   addBreadcrumb(crumb: Omit<Breadcrumb, 'ts_ms'> & { ts_ms?: number }): void {
     SankofaCatch.instance?.addBreadcrumb(crumb);
+  },
+
+  /**
+   * Run [fn] with a temporary scope.  Mutations made via the scope
+   * (tags, extras, user, level, fingerprint) overlay onto any
+   * [captureException] / [captureMessage] calls inside [fn].  Outside
+   * [fn] the scope is gone — async captures deferred past the
+   * closure's return will NOT see the scope.
+   *
+   * No-op when Catch isn't initialized; [fn] still runs with a sink
+   * scope so host code that does work alongside captures isn't skipped.
+   *
+   * ```ts
+   * Sankofa.withScope((scope) => {
+   *   scope.setTag('flow', 'checkout');
+   *   scope.setExtra('cart_id', cart.id);
+   *   Sankofa.captureException(err);
+   * });
+   * ```
+   */
+  withScope<T>(fn: (scope: import('./catch/CatchTypes').SankofaCatchScope) => T): T {
+    const c = SankofaCatch.instance;
+    if (c) return c.withScope(fn);
+    const noop: import('./catch/CatchTypes').SankofaCatchScope = {
+      setTag: () => noop,
+      setTags: () => noop,
+      setExtra: () => noop,
+      setUser: () => noop,
+      setLevel: () => noop,
+      setFingerprint: () => noop,
+    };
+    return fn(noop);
   },
 
   /**

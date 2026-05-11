@@ -79,6 +79,21 @@ export interface SankofaInitConfig {
    * device-info module reports.
    */
   appVersion?: string;
+
+  /**
+   * Synchronous hook fired AFTER an event has been composed but
+   * BEFORE the transport sends it. Return the (possibly modified)
+   * event to ship it; return `null` to drop it entirely.
+   *
+   * Use for PII scrubbing, noise filtering (drop framework-level
+   * setState warnings), or late tag enrichment. Only applies to the
+   * JS-side capture path — native crashes (NSException, JVM uncaught,
+   * POSIX signals) bypass this hook because they're composed in
+   * native code.
+   *
+   * Throws are swallowed.
+   */
+  beforeSend?: import('./catch/CatchTypes').BeforeSendFn;
 }
 
 /**
