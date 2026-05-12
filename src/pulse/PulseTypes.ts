@@ -252,6 +252,12 @@ export interface SubmitPayload {
     email?: string;
   };
   context?: Record<string, unknown>;
+  /**
+   * Active screen / route at submission time. First-class field —
+   * the server stores it as a dedicated indexed column for
+   * cross-product correlation with Heatmap / Catch / Replay.
+   */
+  screen?: string;
   submitted_at?: string;
   answers: AnswerState;
 }

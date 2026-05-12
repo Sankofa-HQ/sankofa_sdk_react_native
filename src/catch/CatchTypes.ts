@@ -158,6 +158,14 @@ export interface CatchEvent {
   breadcrumbs?: Breadcrumb[];
   fingerprint?: string[];
 
+  /**
+   * Active screen / route at capture time. Sourced from the JS-side
+   * screen tracker that `Sankofa.screen()`, `useSankofaScreen`, and
+   * `useSankofaNavigationTracking` all feed. Cross-product
+   * correlation key shared with Heatmap, Replay, Pulse, and Plan.
+   */
+  screen?: string;
+
   flag_snapshot?: Record<string, string>;
   config_snapshot?: Record<string, unknown>;
   trace_id?: string;

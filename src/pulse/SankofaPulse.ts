@@ -1,5 +1,6 @@
 import { evaluate } from './targeting';
 import { PulseClient } from './PulseClient';
+import { getCurrentScreen } from '../core/screenTracker';
 import type {
   EligibilityContext,
   PulseEvent,
@@ -152,6 +153,7 @@ export class SankofaPulse {
       respondent: payload.respondent,
       answers: payload.answers,
       context: this.enrichContext(payload.context),
+      screen: getCurrentScreen(),
     });
     this.emit({
       event: 'survey_completed',

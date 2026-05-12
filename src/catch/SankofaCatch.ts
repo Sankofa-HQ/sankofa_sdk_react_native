@@ -2,6 +2,7 @@ import { Platform } from 'react-native';
 import { getSharedApiKey, getSharedEndpoint } from '../index';
 import type { SankofaModule } from '../core/ModuleRegistry';
 import { getModule, registerModule } from '../core/ModuleRegistry';
+import { getCurrentScreen } from '../core/screenTracker';
 
 import SankofaNativeModule from '../SankofaModule';
 import { CatchBreadcrumbsAutocapture, CatchBreadcrumbsBuffer } from './CatchBreadcrumbs';
@@ -418,6 +419,7 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
 
       breadcrumbs: this.buffer.snapshot(),
       fingerprint: options.fingerprint,
+      screen: getCurrentScreen(),
       flag_snapshot: this.readFlagSnapshot?.() ?? this.autoFlagSnapshot(),
       config_snapshot: this.readConfigSnapshot?.() ?? this.autoConfigSnapshot(),
       trace_id: options.contexts?.trace?.trace_id,

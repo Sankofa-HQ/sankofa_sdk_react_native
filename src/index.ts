@@ -2,6 +2,7 @@ import { Platform } from 'react-native';
 import SankofaNativeModule from './SankofaModule';
 import type { SankofaInitConfig, SankofaPersonTraits } from './SankofaTypes';
 import { markCoreInitialized, routeHandshake, getInstalledModules } from './core/ModuleRegistry';
+import { setCurrentScreen } from './core/screenTracker';
 import { SankofaCatch } from './catch/SankofaCatch';
 import type {
   Breadcrumb,
@@ -408,6 +409,7 @@ export const Sankofa = {
    * @param properties - Optional extra properties attached to the $screen_view event.
    */
   screen(name: string, properties: Record<string, unknown> = {}): void {
+    setCurrentScreen(name);
     SankofaNativeModule.screen(name, properties);
   },
 

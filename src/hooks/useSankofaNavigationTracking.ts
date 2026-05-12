@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import SankofaNativeModule from '../SankofaModule';
+import { setCurrentScreen } from '../core/screenTracker';
 
 /**
  * Structural shape of a `@react-navigation/native` container ref.
@@ -94,6 +95,7 @@ export function useSankofaNavigationTracking(
       if (!name) return;
       if (name === lastTaggedRef.current) return;
       lastTaggedRef.current = name;
+      setCurrentScreen(name);
       SankofaNativeModule.screen(name, {});
     };
 
