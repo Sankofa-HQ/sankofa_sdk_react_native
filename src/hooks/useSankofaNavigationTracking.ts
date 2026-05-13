@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import SankofaNativeModule from '../SankofaModule';
 import { setCurrentScreen } from '../core/screenTracker';
+import { emitScreenSeen } from '../core/screenSeen';
 
 /**
  * Structural shape of a `@react-navigation/native` container ref.
@@ -97,6 +98,7 @@ export function useSankofaNavigationTracking(
       lastTaggedRef.current = name;
       setCurrentScreen(name);
       SankofaNativeModule.screen(name, {});
+      void emitScreenSeen(name, { $auto_detected: true });
     };
 
     // Tag the initial route synchronously.  React Navigation fires

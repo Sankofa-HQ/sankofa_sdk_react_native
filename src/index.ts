@@ -4,6 +4,7 @@ import type { SankofaInitConfig, SankofaPersonTraits } from './SankofaTypes';
 import { markCoreInitialized, routeHandshake, getInstalledModules } from './core/ModuleRegistry';
 import { setCurrentScreen } from './core/screenTracker';
 import { startPresenceHeartbeat, stopPresenceHeartbeat } from './core/presenceHeartbeat';
+import { emitScreenSeen } from './core/screenSeen';
 import { SankofaCatch } from './catch/SankofaCatch';
 import type {
   Breadcrumb,
@@ -417,6 +418,10 @@ export const Sankofa = {
   screen(name: string, properties: Record<string, unknown> = {}): void {
     setCurrentScreen(name);
     SankofaNativeModule.screen(name, properties);
+    // Canonical screen signal — fires regardless of which Sankofa
+    // products the host has enabled, so the lexicon + dwell + presence
+    // are always populated.
+    void emitScreenSeen(name, properties);
   },
 
   /**

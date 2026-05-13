@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import SankofaNativeModule from '../SankofaModule';
 import { setCurrentScreen } from '../core/screenTracker';
+import { emitScreenSeen } from '../core/screenSeen';
 
 /**
  * `useSankofaScreen` — The primary Sankofa hook for React Native.
@@ -31,5 +32,6 @@ export function useSankofaScreen(screenName: string): void {
   useEffect(() => {
     setCurrentScreen(screenName);
     SankofaNativeModule.screen(screenName, {});
+    void emitScreenSeen(screenName, {});
   }, [screenName]);
 }
