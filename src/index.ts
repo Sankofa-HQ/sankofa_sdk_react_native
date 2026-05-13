@@ -3,6 +3,7 @@ import SankofaNativeModule from './SankofaModule';
 import type { SankofaInitConfig, SankofaPersonTraits } from './SankofaTypes';
 import { markCoreInitialized, routeHandshake, getInstalledModules } from './core/ModuleRegistry';
 import { setCurrentScreen } from './core/screenTracker';
+import { startPresenceHeartbeat, stopPresenceHeartbeat } from './core/presenceHeartbeat';
 import { SankofaCatch } from './catch/SankofaCatch';
 import type {
   Breadcrumb,
@@ -252,6 +253,11 @@ export const Sankofa = {
     // Mark core as initialized so modules instantiated AFTER this point
     // can register without emitting the "created before initialize()" warning.
     markCoreInitialized();
+
+    // Live-presence heartbeat — independent of analytics flush so it
+    // ticks at its own cadence (15s) while the app is foregrounded.
+    // Cheap one-tiny-POST-per-tick; paused on background.
+    startPresenceHeartbeat(endpoint, apiKey);
 
     // Phase A: Catch is rolled up into the parent SDK.  Defaults match
     // the "Crashlytics on by default" expectation — hosts that want it
