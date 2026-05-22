@@ -35,7 +35,8 @@ export type SankofaModuleName =
   | 'deploy'
   | 'catch'
   | 'switch'
-  | 'config';
+  | 'config'
+  | 'pulse';
 
 /**
  * Interface every pluggable module implements. The Core never imports

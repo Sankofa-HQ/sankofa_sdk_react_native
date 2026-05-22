@@ -2,6 +2,10 @@ import { Platform } from 'react-native';
 import { getSharedApiKey, getSharedEndpoint } from '../index';
 import type { SankofaModule } from '../core/ModuleRegistry';
 import { getModule, registerModule } from '../core/ModuleRegistry';
+import {
+  deriveIntegrationLevel,
+  type ModuleIntegrationStatus,
+} from '../core/integration';
 import { getCurrentScreen } from '../core/screenTracker';
 
 import SankofaNativeModule from '../SankofaModule';
@@ -259,6 +263,62 @@ export class SankofaCatch implements SankofaModule, SankofaCatchAPI {
     if (cfg.breadcrumbs?.max_buffer !== undefined) {
       this.buffer.setCapacity(cfg.breadcrumbs.max_buffer);
     }
+  }
+
+  /**
+   * Self-audit the host's Catch integration. Mirrors the Deploy
+   * audit's shape so the reverse-handshake reporter can batch every
+   * module into one POST.
+   *
+   * Checks the wiring that is silently broken most often:
+   *   - transport non-null (apiKey + endpoint resolved at construction)
+   *   - module enabled by the server's handshake
+   *   - native error handlers installed when host opted in
+   *   - debug build (warn — crashes don't surface the same way)
+   */
+  async checkIntegration(): Promise<ModuleIntegrationStatus> {
+    const missing: string[] = [];
+    const warnings: string[] = [];
+
+    if (!this.transport) {
+      missing.push(
+        'Catch transport is not initialised — apiKey or endpoint were missing at construction. ' +
+          'Make sure Sankofa.initialize() runs before any SankofaCatch usage.',
+      );
+    }
+    if (!this.enabled) {
+      missing.push(
+        'Catch is disabled by the server-side handshake response. ' +
+          'Open the dashboard Project Settings → Catch and toggle it on, or check your org plan tier.',
+      );
+    }
+    if (!this.installedHandlers) {
+      warnings.push(
+        'Native error handlers are not installed — uncaught exceptions and promise rejections will not be auto-captured. ' +
+          'Pass captureUnhandled: true / captureRejections: true to SankofaCatch.',
+      );
+    }
+    if (this.errorSampleRate <= 0) {
+      warnings.push(
+        `errorSampleRate is ${this.errorSampleRate} — every captured event will be sampled out. Useful in dev; misleading in prod.`,
+      );
+    }
+    const inDev =
+      typeof (globalThis as any).__DEV__ === 'boolean'
+        ? (globalThis as any).__DEV__
+        : false;
+    if (inDev) {
+      warnings.push(
+        'Running in __DEV__ — RN replaces some platform error surfaces (RedBox), so captured stacks may look different than in release builds.',
+      );
+    }
+
+    return {
+      module: 'catch',
+      level: deriveIntegrationLevel(missing),
+      missing,
+      warnings,
+    };
   }
 
   // ── Public API ──────────────────────────────────────────────────

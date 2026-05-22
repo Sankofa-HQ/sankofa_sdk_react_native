@@ -38,6 +38,36 @@ export interface NativeDeviceInfo {
 }
 
 /**
+ * Raw integration audit data returned by the native bridge.
+ *
+ * Returned by `deployCheckIntegration()`. The JS layer in
+ * `SankofaDeploy.checkIntegration()` maps this to a structured
+ * `ModuleIntegrationStatus` with human-readable `missing[]` /
+ * `warnings[]` strings.
+ *
+ * Fields are `null` when the platform doesn't have that concept
+ * (e.g. iOS has no INTERNET permission; Android doesn't surface the
+ * AppDelegate class name).
+ */
+export interface DeployIntegrationAuditRaw {
+  /** `true` once SankofaDeployBundleProvider has been called at least
+   *  once (proves MainApplication/AppDelegate patch is live). */
+  bundleLoaderWired: boolean;
+  /** Android: declared in manifest AND granted at runtime. iOS: null. */
+  internetPermission: boolean | null;
+  /** Android: host's Application class name. iOS: null. */
+  applicationClass: string | null;
+  /** Android: host's ReactNativeHost subclass name. iOS: null. */
+  reactNativeHostClass?: string | null;
+  /** iOS: host's UIApplicationDelegate class name. Android: null. */
+  appDelegateClass?: string | null;
+  /** SharedPreferences (Android) / UserDefaults (iOS) round-trip works. */
+  storageOk: boolean;
+  /** 'android' or 'ios'. */
+  platform: 'android' | 'ios';
+}
+
+/**
  * Typed surface of the native Sankofa Expo Module.
  *
  * Both the iOS Swift module ([sankofa_sdk_react_native/ios/SankofaModule.swift])
@@ -99,6 +129,17 @@ export interface SankofaBridge {
   deployStorageSet?: (key: string, value: string) => void;
   deployStorageRemove?: (key: string) => void;
   deployStorageMultiRemove?: (keys: string[]) => void;
+
+  /**
+   * Self-audit the host's Deploy wiring. Returns raw probe data;
+   * `SankofaDeploy.checkIntegration()` maps it to a structured
+   * `ModuleIntegrationStatus` with human-readable messages.
+   *
+   * Optional because older native binaries may predate this method —
+   * the JS layer treats absence as "audit unsupported" rather than
+   * "audit failed."
+   */
+  deployCheckIntegration?: () => Promise<DeployIntegrationAuditRaw> | DeployIntegrationAuditRaw;
 }
 
 /**

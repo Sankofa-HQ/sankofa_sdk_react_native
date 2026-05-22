@@ -1,5 +1,9 @@
 import type { SankofaModule } from '../core/ModuleRegistry';
-import { registerModule } from '../core/ModuleRegistry';
+import { isCoreInitialized, registerModule } from '../core/ModuleRegistry';
+import {
+  deriveIntegrationLevel,
+  type ModuleIntegrationStatus,
+} from '../core/integration';
 import { ConfigStorage } from './ConfigStorage';
 import type {
   ConfigChangeListener,
@@ -52,6 +56,48 @@ export class SankofaConfig implements SankofaModule, SankofaConfigAPI {
     this.savedAt = Date.now();
     await this.persist();
     this.fire(changed, removed);
+  }
+
+  /**
+   * Self-audit the host's Config integration. Mirrors Switch — checks
+   * the cases that silently lose values:
+   *   - core not initialised before construction (broken)
+   *   - no server values + no defaults (broken — every get() returns inline default)
+   *   - handshake hasn't landed yet (warn)
+   *   - etag empty (warn — every refresh round-trips)
+   */
+  async checkIntegration(): Promise<ModuleIntegrationStatus> {
+    const missing: string[] = [];
+    const warnings: string[] = [];
+
+    if (!isCoreInitialized()) {
+      missing.push(
+        'Sankofa.initialize() has not run yet — SankofaConfig was constructed before the core. Move new SankofaConfig() after the initialize call.',
+      );
+    }
+    const valueCount = Object.keys(this.values).length;
+    const defaultCount = Object.keys(this.defaults).length;
+    if (valueCount === 0 && defaultCount === 0) {
+      missing.push(
+        'No config values from server and no bundled defaults supplied. Every get(key, fallback) will return the inline fallback.',
+      );
+    } else if (valueCount === 0) {
+      warnings.push(
+        'No values from server yet — handshake may not have completed, or the project has no config items. Defaults will be used.',
+      );
+    }
+    if (!this.etag) {
+      warnings.push(
+        'No etag stored — the SDK can not short-circuit subsequent handshakes with If-None-Match.',
+      );
+    }
+
+    return {
+      module: 'config',
+      level: deriveIntegrationLevel(missing),
+      missing,
+      warnings,
+    };
   }
 
   // ── Public API ──────────────────────────────────────────────────

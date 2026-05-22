@@ -366,5 +366,81 @@ class SankofaModule : Module() {
       keys.forEach { edit.remove(it) }
       edit.apply()
     }
+
+    // ── deployCheckIntegration ──────────────────────────────────────────
+    // Self-audit the host's Deploy wiring. Pure reflection + permission
+    // probes — no side effects. The JS side maps this raw map to a
+    // structured ModuleIntegrationStatus that the host (and eventually
+    // the dashboard) can surface as "SDK Integration Incomplete."
+    //
+    // Each field reports whether ONE host-side wiring requirement is
+    // satisfied:
+    //
+    //  - bundleLoaderWired: has SankofaDeployBundleProvider.getJSBundleFile
+    //    been called at least once? React Native invokes it lazily during
+    //    bridge init when MainApplication overrides getJSBundleFile() and
+    //    delegates to our provider. False AFTER the bridge has loaded
+    //    means the MainApplication patch is missing — OTA bundles download
+    //    but never get loaded by RN.
+    //  - internetPermission: declared in manifest AND granted at runtime.
+    //  - applicationClass: best-effort name of the host's Application
+    //    class (for diagnostics in dashboard).
+    //  - storageOk: SharedPreferences read/write works.
+    //  - reactNativeHostClass: best-effort class name of the host's
+    //    ReactNativeHost subclass (for diagnostics).
+    Function("deployCheckIntegration") { ->
+      val ctx = requireApplicationContext()
+        ?: return@Function mapOf<String, Any?>(
+          "bundleLoaderWired" to false,
+          "internetPermission" to false,
+          "applicationClass" to null,
+          "reactNativeHostClass" to null,
+          "storageOk" to false,
+          "platform" to "android",
+        )
+
+      val prefs = deployPrefs(ctx)
+      val wired = prefs.getBoolean("bundle_loader_wired", false)
+
+      val internet = ctx.checkSelfPermission(android.Manifest.permission.INTERNET) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+
+      val storageOk = try {
+        prefs.edit().putString("__audit_probe", "1").apply()
+        prefs.edit().remove("__audit_probe").apply()
+        true
+      } catch (_: Throwable) {
+        false
+      }
+
+      val app = appContext.reactContext?.applicationContext as? android.app.Application
+      val applicationClass = app?.javaClass?.name
+
+      // Best-effort: ask the Application's ReactApplication interface for
+      // its ReactNativeHost so we can report the host class. Useful in
+      // the dashboard ("MainApplication uses CustomReactNativeHost — did
+      // your patch land in there?"). No fallback — if reflection fails,
+      // we just report null.
+      val hostClass = try {
+        if (app != null) {
+          val reactAppClass = Class.forName("com.facebook.react.ReactApplication")
+          if (reactAppClass.isInstance(app)) {
+            val getHost = reactAppClass.getMethod("getReactNativeHost")
+            getHost.invoke(app)?.javaClass?.name
+          } else null
+        } else null
+      } catch (_: Throwable) {
+        null
+      }
+
+      mapOf(
+        "bundleLoaderWired" to wired,
+        "internetPermission" to internet,
+        "applicationClass" to applicationClass,
+        "reactNativeHostClass" to hostClass,
+        "storageOk" to storageOk,
+        "platform" to "android",
+      )
+    }
   }
 }

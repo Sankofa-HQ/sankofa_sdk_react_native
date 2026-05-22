@@ -94,6 +94,59 @@ export interface SankofaInitConfig {
    * Throws are swallowed.
    */
   beforeSend?: import('./catch/CatchTypes').BeforeSendFn;
+
+  // ── Module enables (Sankofa unified init) ─────────────────────────
+  //
+  // Boolean flags that auto-construct the corresponding product
+  // singletons during `Sankofa.initialize()`. After init, access them
+  // via `Sankofa.deploy`, `Sankofa.flags`, `Sankofa.config`,
+  // `Sankofa.errors`, `Sankofa.pulse`. Matches the CLI's product flag
+  // surface (`sankofa init --deploy --flag --config --catch`).
+  //
+  // The legacy `new SankofaDeploy(...)`, `new SankofaSwitch(...)`,
+  // `new SankofaConfig(...)`, `new SankofaPulse(...)` constructors
+  // continue to work for backward compatibility — but new code should
+  // prefer the enable flags.
+
+  /**
+   * Auto-construct the SankofaDeploy singleton during initialize.
+   * Access via `Sankofa.deploy` afterwards.
+   * @default false
+   */
+  enableDeploy?: boolean;
+
+  /** Constructor options forwarded to `new SankofaDeploy(...)` when enableDeploy is true. */
+  deployOptions?: import('./deploy/DeployTypes').DeployConfig;
+
+  /**
+   * Auto-construct the SankofaSwitch (feature flags) singleton during initialize.
+   * Access via `Sankofa.flags` afterwards. ("flags" because `switch` is a reserved word.)
+   * @default false
+   */
+  enableFlags?: boolean;
+
+  /** Constructor options forwarded to `new SankofaSwitch(...)` when enableFlags is true. */
+  flagsOptions?: { defaults?: Record<string, import('./switch/SwitchTypes').FlagDecision> };
+
+  /**
+   * Auto-construct the SankofaConfig (remote config) singleton during initialize.
+   * Access via `Sankofa.config` afterwards.
+   * @default false
+   */
+  enableConfig?: boolean;
+
+  /** Constructor options forwarded to `new SankofaConfig(...)` when enableConfig is true. */
+  configOptions?: { defaults?: Record<string, import('./config/ConfigTypes').ItemDecision> };
+
+  /**
+   * Auto-construct the SankofaPulse (surveys) singleton during initialize.
+   * Access via `Sankofa.pulse` afterwards.
+   * @default false
+   */
+  enablePulse?: boolean;
+
+  /** Constructor options forwarded to `new SankofaPulse(...)` when enablePulse is true. */
+  pulseOptions?: import('./pulse/SankofaPulse').PulseConstructorOptions;
 }
 
 /**

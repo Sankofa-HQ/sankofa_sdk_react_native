@@ -2,10 +2,16 @@ import { Platform } from 'react-native';
 import SankofaNativeModule from './SankofaModule';
 import type { SankofaInitConfig, SankofaPersonTraits } from './SankofaTypes';
 import { markCoreInitialized, routeHandshake, getInstalledModules } from './core/ModuleRegistry';
+import { reportIntegrationStatuses } from './core/integrationReporter';
+import type { ModuleIntegrationStatus as ModuleIntegrationStatusBase } from './core/integration';
 import { setCurrentScreen } from './core/screenTracker';
 import { startPresenceHeartbeat, stopPresenceHeartbeat } from './core/presenceHeartbeat';
 import { emitScreenSeen } from './core/screenSeen';
 import { SankofaCatch } from './catch/SankofaCatch';
+import { SankofaDeploy as SankofaDeployClass } from './deploy/SankofaDeploy';
+import { SankofaSwitch as SankofaSwitchClass } from './switch/SankofaSwitch';
+import { SankofaConfig as SankofaConfigClass } from './config/SankofaConfig';
+import { SankofaPulse as SankofaPulseClass } from './pulse';
 import type {
   Breadcrumb,
   CaptureOptions,
@@ -69,6 +75,13 @@ export type {
 // Traffic Cop — module registry (public for advanced use / future modules)
 export type { SankofaModule, SankofaModuleName } from './core/ModuleRegistry';
 export { hasModule, getInstalledModules } from './core/ModuleRegistry';
+
+// Module integration self-audit — surfaced so hosts can render their own
+// "SDK integration incomplete" UI from `Sankofa.deploy.checkIntegration()`.
+export type {
+  ModuleIntegrationLevel,
+  ModuleIntegrationStatus,
+} from './core/integration';
 
 // Sankofa Pulse — surveys (NPS, CSAT, custom). Renders an inline modal,
 // resolves targeting + branching locally against the same DSL the
@@ -190,6 +203,35 @@ export function getHandshakeEtag(): string {
 }
 
 /**
+ * Module singletons constructed by `Sankofa.initialize()` when the
+ * corresponding `enableX` flag is true. Exposed via `Sankofa.deploy`,
+ * `Sankofa.flags`, `Sankofa.config`, `Sankofa.pulse`. Catch follows the
+ * same shape via `Sankofa.errors` (delegates to `SankofaCatch.instance`).
+ *
+ * Legacy `new SankofaDeploy(...)` / `new SankofaSwitch(...)` etc still
+ * work — they're independent of these refs and exist for backward
+ * compatibility.
+ */
+let _deployModule: SankofaDeployClass | null = null;
+let _switchModule: SankofaSwitchClass | null = null;
+let _configModule: SankofaConfigClass | null = null;
+let _pulseModule: SankofaPulseClass | null = null;
+
+/**
+ * Last Deploy integration audit result, cached for the reverse handshake
+ * + host UIs that want to render their own "SDK integration incomplete"
+ * banner. Populated asynchronously by `Sankofa.initialize()` after the
+ * native bridge has had a moment to invoke the bundle provider.
+ *
+ * Read via `Sankofa.lastDeployIntegrationStatus`.
+ */
+import type { ModuleIntegrationStatus as _DeployIntegrationStatus } from './core/integration';
+let _lastDeployIntegrationStatus: _DeployIntegrationStatus | null = null;
+export function getLastDeployIntegrationStatus(): _DeployIntegrationStatus | null {
+  return _lastDeployIntegrationStatus;
+}
+
+/**
  * Returns the cached handshake modules. If the handshake hasn't
  * completed yet, returns null. Use `waitForHandshake()` to await.
  */
@@ -304,6 +346,101 @@ export const Sankofa = {
         beforeSend: config.beforeSend,
       });
     }
+
+    // ── Module enables (unified init) ───────────────────────────────
+    //
+    // Boolean `enableX` flags auto-construct the corresponding product
+    // singletons. After init, the host reaches them via
+    // `Sankofa.deploy`, `Sankofa.flags`, `Sankofa.config`,
+    // `Sankofa.pulse` (and `Sankofa.errors` for Catch above).
+    //
+    // Skipped when the host already constructed the class manually
+    // (legacy `new SankofaDeploy(...)` path) — we keep that working
+    // for backward compatibility. Detection is "instance already
+    // tracked", because each module's constructor calls
+    // registerModule(this) in the ModuleRegistry.
+
+    if (config.enableDeploy && !_deployModule) {
+      _deployModule = new SankofaDeployClass(config.deployOptions ?? {});
+    }
+    if (config.enableFlags && !_switchModule) {
+      _switchModule = new SankofaSwitchClass(config.flagsOptions ?? {});
+    }
+    if (config.enableConfig && !_configModule) {
+      _configModule = new SankofaConfigClass(config.configOptions ?? {});
+    }
+    if (config.enablePulse && !_pulseModule) {
+      _pulseModule = new SankofaPulseClass(config.pulseOptions ?? {});
+    }
+
+    // ── Reverse handshake — batched integration audit ───────────────
+    // Deferred 1.5s so RN's bridge has time to call the Deploy bundle
+    // provider at least once (sets the `bundle_loader_wired` flag) and
+    // the GET handshake has time to deliver Switch/Config flags. Each
+    // module's audit runs even if it throws; one POST goes out with
+    // every status the audit could collect. Errors stay non-fatal.
+    setTimeout(() => {
+      void (async () => {
+        const statuses: ModuleIntegrationStatusBase[] = [];
+
+        if (_deployModule) {
+          try {
+            const s = await _deployModule.checkIntegration();
+            _lastDeployIntegrationStatus = s;
+            statuses.push(s);
+            if (__DEV__ && s.level !== 'full') {
+              const banner =
+                s.level === 'broken'
+                  ? '[Sankofa.deploy] SDK INTEGRATION BROKEN'
+                  : '[Sankofa.deploy] SDK integration incomplete';
+              const lines: string[] = [banner];
+              for (const m of s.missing) lines.push(`  ✗ ${m}`);
+              for (const w of s.warnings) lines.push(`  ⚠ ${w}`);
+              console.warn(lines.join('\n'));
+            }
+          } catch {
+            // Audit errors are non-fatal; the next launch retries.
+          }
+        }
+
+        const catchInstance = SankofaCatch.instance;
+        if (catchInstance) {
+          try {
+            statuses.push(await catchInstance.checkIntegration());
+          } catch {
+            // ignore
+          }
+        }
+        if (_switchModule) {
+          try {
+            statuses.push(await _switchModule.checkIntegration());
+          } catch {
+            // ignore
+          }
+        }
+        if (_configModule) {
+          try {
+            statuses.push(await _configModule.checkIntegration());
+          } catch {
+            // ignore
+          }
+        }
+        if (_pulseModule) {
+          try {
+            statuses.push(await _pulseModule.checkIntegration());
+          } catch {
+            // ignore
+          }
+        }
+
+        if (statuses.length > 0) {
+          void reportIntegrationStatuses(apiKey, endpoint, statuses, {
+            appVersion: config.appVersion,
+            debug: config.debug,
+          });
+        }
+      })();
+    }, 1500);
 
     // 2. Call unified handshake (async — doesn't block initialization)
     // Reverse Handshake: we append `installed=core,deploy,...` so the
@@ -598,5 +735,69 @@ export const Sankofa = {
     const c = SankofaCatch.instance;
     if (!c) return;
     await c.flush();
+  },
+
+  // ─────────────────────────────────────────────────────────────────
+  //  Module accessors — `Sankofa.deploy`, `Sankofa.flags`,
+  //  `Sankofa.config`, `Sankofa.errors`, `Sankofa.pulse`.
+  //
+  // Each getter returns the singleton constructed during
+  // `Sankofa.initialize()` (via the corresponding `enableX` flag), or
+  // the legacy instance if the host built one manually with
+  // `new SankofaDeploy(...)`. Returns null if neither.
+  //
+  // Why getters and not properties: lazy resolution means the
+  // initialize-then-construct sequence stays one synchronous pass
+  // without circular timing pitfalls.
+  // ─────────────────────────────────────────────────────────────────
+
+  /** Sankofa Deploy — OTA updates. Construct via `enableDeploy: true` in Sankofa.initialize. */
+  get deploy(): SankofaDeployClass | null {
+    return _deployModule;
+  },
+
+  /** Sankofa Switch — feature flags. Construct via `enableFlags: true` in Sankofa.initialize. */
+  get flags(): SankofaSwitchClass | null {
+    return _switchModule;
+  },
+
+  /**
+   * Sankofa Config — remote configuration values. Construct via
+   * `enableConfig: true` in Sankofa.initialize.
+   *
+   * Note: the parameter passed to `Sankofa.initialize(apiKey, config)`
+   * is named `config` in this scope, but that is the *init* config; the
+   * `Sankofa.config` accessor here is the remote-config module
+   * (a different concept).
+   */
+  get config(): SankofaConfigClass | null {
+    return _configModule;
+  },
+
+  /**
+   * Sankofa Catch — errors + crashes. Construct via `enableCatch: true`
+   * in Sankofa.initialize (default true). The static helpers on
+   * `Sankofa` (`captureException`, `log`, etc.) also route here.
+   */
+  get errors(): SankofaCatch | null {
+    return SankofaCatch.instance;
+  },
+
+  /** Sankofa Pulse — surveys. Construct via `enablePulse: true` in Sankofa.initialize. */
+  get pulse(): SankofaPulseClass | null {
+    return _pulseModule;
+  },
+
+  /**
+   * Last result of `Sankofa.deploy.checkIntegration()` from the
+   * automatic post-init audit. `null` until the audit runs (~1.5s after
+   * `initialize()`). Hosts that want their own "SDK integration
+   * incomplete" UI can read this and skip a fresh probe.
+   *
+   * In `__DEV__` builds the same status is printed via `console.warn`
+   * when level !== 'full'.
+   */
+  get lastDeployIntegrationStatus(): _DeployIntegrationStatus | null {
+    return _lastDeployIntegrationStatus;
   },
 };

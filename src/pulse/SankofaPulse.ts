@@ -1,6 +1,10 @@
 import { evaluate } from './targeting';
 import { PulseClient } from './PulseClient';
 import { getCurrentScreen } from '../core/screenTracker';
+import {
+  deriveIntegrationLevel,
+  type ModuleIntegrationStatus,
+} from '../core/integration';
 import type {
   EligibilityContext,
   PulseEvent,
@@ -35,7 +39,7 @@ import type {
  * passes survey IDs to show() directly.
  */
 
-interface PulseConstructorOptions {
+export interface PulseConstructorOptions {
   /**
    * Override the API endpoint. Defaults to whatever
    * Sankofa.initialize() received.
@@ -73,6 +77,42 @@ export class SankofaPulse {
 
   constructor(options: PulseConstructorOptions = {}) {
     this.opts = options;
+  }
+
+  /**
+   * Self-audit the host's Pulse integration. Pulse defers most wiring
+   * to show() time, so the audit mostly checks "can we even reach the
+   * server when asked?" and "is a modal host mounted to render?"
+   */
+  async checkIntegration(): Promise<ModuleIntegrationStatus> {
+    const missing: string[] = [];
+    const warnings: string[] = [];
+
+    const endpoint = this.opts.endpoint ?? this.resolveEndpoint();
+    const apiKey = this.opts.apiKey ?? this.resolveApiKey();
+
+    if (!endpoint) {
+      missing.push(
+        'Pulse cannot resolve an endpoint — call Sankofa.initialize() before constructing SankofaPulse, or pass it in PulseConstructorOptions.',
+      );
+    }
+    if (!apiKey) {
+      missing.push(
+        'Pulse cannot resolve an API key — call Sankofa.initialize() before constructing SankofaPulse, or pass it in PulseConstructorOptions.',
+      );
+    }
+    if (this.modalListeners.size === 0) {
+      warnings.push(
+        'No <SurveyModalHost /> is mounted yet — show() will queue a bundle, but nothing will render until the host mounts a listener via onBundleChange().',
+      );
+    }
+
+    return {
+      module: 'pulse',
+      level: deriveIntegrationLevel(missing),
+      missing,
+      warnings,
+    };
   }
 
   // ── Public API ────────────────────────────────────────────────

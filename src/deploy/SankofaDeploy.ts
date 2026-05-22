@@ -3,6 +3,10 @@ import SankofaNativeModule from '../SankofaModule';
 import { DeployStorage } from './DeployStorage';
 import { getSharedApiKey, getSharedEndpoint } from '../index';
 import { registerModule, type SankofaModule } from '../core/ModuleRegistry';
+import {
+  deriveIntegrationLevel,
+  type ModuleIntegrationStatus,
+} from '../core/integration';
 import type {
   DeployConfig,
   UpdateCheckResult,
@@ -372,6 +376,106 @@ export class SankofaDeploy implements SankofaModule {
     if (!pendingLabel || !pendingBundlePath) return false;
     const promoted = await this._promotePendingBundle();
     return promoted;
+  }
+
+  /**
+   * Self-audit the host's Deploy integration. Returns a structured
+   * status describing whether the bundle-loader patch, INTERNET
+   * permission (Android), and native bridge are all wired up.
+   *
+   * Called automatically by [Sankofa.initialize] when `enableDeploy: true`;
+   * the result is logged in `__DEV__` builds and held for later use by
+   * the reverse-handshake (which will eventually report integration
+   * status to the server so the dashboard can show "incomplete SDK
+   * integration" warnings — Phase 2).
+   *
+   * Mirrors Flutter's `SankofaDeploy.checkIntegration()`.
+   */
+  async checkIntegration(): Promise<ModuleIntegrationStatus> {
+    const probe = SankofaNativeModule.deployCheckIntegration;
+    if (typeof probe !== 'function') {
+      return {
+        module: 'deploy',
+        level: 'broken',
+        missing: [
+          'Native bridge does not expose `deployCheckIntegration` — the host app was built against an older `sankofa-react-native` binary. Rebuild the native shell.',
+        ],
+        warnings: [],
+      };
+    }
+
+    let raw;
+    try {
+      raw = await Promise.resolve(probe());
+    } catch (err: any) {
+      return {
+        module: 'deploy',
+        level: 'broken',
+        missing: [`Platform integration check failed: ${err?.message ?? String(err)}`],
+        warnings: [],
+      };
+    }
+
+    const missing: string[] = [];
+    const warnings: string[] = [];
+
+    if (raw.bundleLoaderWired !== true) {
+      // In `__DEV__` builds, RN serves the JS bundle from Metro and the
+      // host's `bundleURL()` short-circuits to the Metro URL *before*
+      // hitting our provider — so a `false` flag in DEBUG is expected
+      // unless the host adopted the updated patch that probes OTA in
+      // DEBUG too. We downgrade to a warning to avoid false positives.
+      const inDebug =
+        typeof (globalThis as any).__DEV__ === 'boolean'
+          ? (globalThis as any).__DEV__
+          : false;
+
+      if (raw.platform === 'android') {
+        missing.push(
+          'MainApplication does not override `getJSBundleFile()` to call ' +
+            '`SankofaDeployBundleProvider.getJSBundleFile(applicationContext)` — ' +
+            'OTA bundles will download but RN will keep loading the embedded bundle. ' +
+            'Re-run `sankofa init --deploy` or patch MainApplication manually.',
+        );
+      } else if (inDebug) {
+        warnings.push(
+          'iOS AppDelegate bundle-loader probe was not invoked yet — ' +
+            'this is normal in `__DEV__` builds where Metro serves the bundle directly. ' +
+            'The audit will return `full` in a release build.',
+        );
+      } else {
+        missing.push(
+          'AppDelegate / ReactNativeDelegate does not delegate `bundleURL()` to ' +
+            '`SankofaDeployBundleProvider.bundleURL()` — OTA bundles will download but RN will keep ' +
+            'loading the embedded bundle. Re-run `sankofa init --deploy` or patch AppDelegate.swift manually.',
+        );
+      }
+    }
+
+    if (raw.platform === 'android' && raw.internetPermission === false) {
+      missing.push(
+        'AndroidManifest is missing `<uses-permission android:name="android.permission.INTERNET" />` ' +
+          '(or the permission was revoked at runtime). The updater cannot reach the Sankofa endpoint. ' +
+          'Add the permission and re-run.',
+      );
+    }
+
+    if (raw.storageOk === false) {
+      warnings.push(
+        raw.platform === 'android'
+          ? 'SharedPreferences round-trip failed — Deploy state cannot be persisted. ' +
+              'Check device storage / sandbox restrictions.'
+          : 'UserDefaults round-trip failed — Deploy state cannot be persisted. ' +
+              'Check app sandbox / encryption restrictions.',
+      );
+    }
+
+    return {
+      module: 'deploy',
+      level: deriveIntegrationLevel(missing),
+      missing,
+      warnings,
+    };
   }
 
   /** Clean up listeners. Call when the app is unmounting. */

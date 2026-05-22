@@ -1,5 +1,9 @@
 import type { SankofaModule } from '../core/ModuleRegistry';
 import { registerModule, isCoreInitialized } from '../core/ModuleRegistry';
+import {
+  deriveIntegrationLevel,
+  type ModuleIntegrationStatus,
+} from '../core/integration';
 import { SwitchStorage } from './SwitchStorage';
 import type {
   FlagChangeListener,
@@ -67,6 +71,54 @@ export class SankofaSwitch implements SankofaModule, SankofaSwitchAPI {
     this.savedAt = Date.now();
     await this.persist();
     this.fire(changed, removed);
+  }
+
+  /**
+   * Self-audit the host's Switch integration. Mirrors Deploy's audit
+   * shape so the reverse-handshake reporter can batch it.
+   *
+   * Checks the common silent-breakage cases:
+   *   - hydrate finished (storage worked)
+   *   - handshake delivered flags (or at least defaults were supplied)
+   *   - core was initialised before construction
+   */
+  async checkIntegration(): Promise<ModuleIntegrationStatus> {
+    const missing: string[] = [];
+    const warnings: string[] = [];
+
+    if (!isCoreInitialized()) {
+      missing.push(
+        'Sankofa.initialize() has not run yet — SankofaSwitch was constructed before the core. Move new SankofaSwitch() after the initialize call.',
+      );
+    }
+    if (!this.hydrated) {
+      warnings.push(
+        'Flag cache has not finished hydrating from native storage. First getFlag() calls will return defaults until hydration completes.',
+      );
+    }
+    const flagCount = Object.keys(this.flags).length;
+    const defaultCount = Object.keys(this.defaults).length;
+    if (flagCount === 0 && defaultCount === 0) {
+      missing.push(
+        'No flags loaded from server and no bundled defaults supplied. Every getFlag(key) will return the inline fallback value.',
+      );
+    } else if (flagCount === 0) {
+      warnings.push(
+        'No flags from server yet — handshake may not have completed, or the project has no flags defined. Defaults will be used.',
+      );
+    }
+    if (!this.etag) {
+      warnings.push(
+        'No etag stored — the SDK can not short-circuit subsequent handshakes with If-None-Match.',
+      );
+    }
+
+    return {
+      module: 'switch',
+      level: deriveIntegrationLevel(missing),
+      missing,
+      warnings,
+    };
   }
 
   // ── Public API ──────────────────────────────────────────────────

@@ -390,5 +390,74 @@ public class SankofaModule: Module {
     Function("deployStorageMultiRemove") { (keys: [String]) in
       keys.forEach { UserDefaults.standard.removeObject(forKey: $0) }
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // deployCheckIntegration
+    //
+    // Self-audit the host's Deploy wiring. Pure runtime probes — no
+    // side effects. The JS side maps this raw dict to a structured
+    // ModuleIntegrationStatus that the host (and eventually the
+    // dashboard) can surface as "SDK Integration Incomplete."
+    //
+    // Each field reports whether ONE host-side wiring requirement is
+    // satisfied:
+    //
+    //  - bundleLoaderWired: has SankofaDeployBundleProvider.bundleURL()
+    //    been called at least once? React Native's bridge invokes it
+    //    when AppDelegate / ReactNativeDelegate overrides bundleURL()
+    //    and delegates to our provider. False AFTER the bridge has
+    //    loaded means the AppDelegate patch is missing — OTA bundles
+    //    download but never get loaded by RN.
+    //    Note: in #if DEBUG builds the CLI's older AppDelegate patch
+    //    skipped the OTA path entirely; updated patches probe it in
+    //    both modes. The JS layer treats `wired:false && __DEV__` as a
+    //    warning rather than broken to avoid false positives on old
+    //    DEBUG patches.
+    //  - appDelegateClass: best-effort name of the host's AppDelegate
+    //    class (for diagnostics in dashboard).
+    //  - storageOk: UserDefaults read/write works.
+    // ─────────────────────────────────────────────────────────────────
+    Function("deployCheckIntegration") { () -> [String: Any?] in
+      let defaults = UserDefaults.standard
+
+      let wired = defaults.bool(forKey: "sankofa_deploy_bundle_loader_wired")
+
+      let storageOk: Bool = {
+        defaults.set("1", forKey: "sankofa_audit_probe")
+        let v = defaults.string(forKey: "sankofa_audit_probe")
+        defaults.removeObject(forKey: "sankofa_audit_probe")
+        return v == "1"
+      }()
+
+      // UIApplication.shared.delegate must be read on the main thread.
+      // The Expo Function {} closure runs on the JS thread, so dispatch
+      // synchronously to main to grab the class name (the actual class
+      // metadata is thread-safe; only the UIApplication access requires
+      // main).
+      let delegateClass: String? = {
+        var name: String?
+        if Thread.isMainThread {
+          if let d = UIApplication.shared.delegate {
+            name = String(describing: type(of: d))
+          }
+        } else {
+          DispatchQueue.main.sync {
+            if let d = UIApplication.shared.delegate {
+              name = String(describing: type(of: d))
+            }
+          }
+        }
+        return name
+      }()
+
+      return [
+        "bundleLoaderWired": wired,
+        "internetPermission": NSNull(),   // iOS has no INTERNET permission
+        "applicationClass": NSNull(),
+        "appDelegateClass": delegateClass as Any,
+        "storageOk": storageOk,
+        "platform": "ios",
+      ]
+    }
   }
 }
