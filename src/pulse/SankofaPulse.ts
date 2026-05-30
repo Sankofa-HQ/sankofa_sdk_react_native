@@ -1,6 +1,12 @@
+import { AppState, type NativeEventSubscription } from 'react-native';
 import { evaluate } from './targeting';
 import { PulseClient } from './PulseClient';
-import { getCurrentScreen } from '../core/screenTracker';
+import { PulseStorage } from './PulseStorage';
+import { getCurrentScreen, onScreenChange } from '../core/screenTracker';
+
+/** Default dismiss cooldown when the server omits one — 7 days, matching
+ *  the dashboard default and the web/iOS SDKs. */
+const DEFAULT_COOLDOWN_SECONDS = 7 * 24 * 60 * 60;
 import {
   deriveIntegrationLevel,
   type ModuleIntegrationStatus,
@@ -75,8 +81,34 @@ export class SankofaPulse {
   private currentBundle: SurveyBundle | null = null;
   private modalListeners: Set<(bundle: SurveyBundle | null) => void> = new Set();
 
+  // ── Auto-show pump state ──────────────────────────────────────
+  private autoShowEnabled = true;
+  private autoShownThisSession = new Set<string>();
+  private autoShowStarted = false;
+  private appStateSub: NativeEventSubscription | null = null;
+  private screenUnsub: (() => void) | null = null;
+
   constructor(options: PulseConstructorOptions = {}) {
     this.opts = options;
+    this.startAutoShowTriggers();
+  }
+
+  /**
+   * Opt out of (or back into) automatic survey presentation. Mirrors the
+   * web `pulsePlugin({ autoShow: false })` switch and iOS
+   * `SankofaPulse.shared.autoShowEnabled`. Set before the first foreground.
+   */
+  setAutoShowEnabled(enabled: boolean): void {
+    this.autoShowEnabled = enabled;
+  }
+
+  /** Detach the auto-show triggers (AppState + screen-change). */
+  stopAutoShow(): void {
+    this.appStateSub?.remove();
+    this.appStateSub = null;
+    this.screenUnsub?.();
+    this.screenUnsub = null;
+    this.autoShowStarted = false;
   }
 
   /**
@@ -148,12 +180,7 @@ export class SankofaPulse {
       return;
     }
     const externalId =
-      options.respondent?.external_id ?? this.resolveExternalId();
-    if (!externalId) {
-      // Without an external_id we can't sample / save partials.
-      // Refuse rather than fail silently.
-      throw new Error('SankofaPulse.show: missing external_id (call Sankofa.initialize() first)');
-    }
+      options.respondent?.external_id ?? (await this.getRespondentId());
     const client = this.makeClient();
     const bundle = await client.loadSurvey(surveyId, externalId);
 
@@ -178,6 +205,8 @@ export class SankofaPulse {
     const surveyId = this.currentBundle.survey.id;
     this.currentBundle = null;
     this.notifyBundleChange();
+    // Stamp the dismiss so the auto-show pump respects the cooldown.
+    void this.stampDismiss(surveyId);
     this.emit({ event: 'survey_dismissed', survey_id: surveyId, reason });
   }
 
@@ -195,6 +224,9 @@ export class SankofaPulse {
       context: this.enrichContext(payload.context),
       screen: getCurrentScreen(),
     });
+    // A completed survey should also respect the cooldown (don't re-show
+    // a survey the respondent just finished).
+    void this.stampDismiss(payload.surveyId);
     this.emit({
       event: 'survey_completed',
       survey_id: payload.surveyId,
@@ -258,10 +290,11 @@ export class SankofaPulse {
   ): Promise<Survey[]> {
     const client = this.makeClient();
     const summaries = await client.listSurveys();
+    // Sampling key must be the stable anonymous/distinct id (matching web).
+    // Do NOT fall back to user_id — mixing it in would bucket the same
+    // person differently pre/post-login for the same survey.
     const externalId =
-      options.respondent?.external_id ??
-      options.respondent?.user_id ??
-      this.resolveExternalId();
+      options.respondent?.external_id ?? (await this.getRespondentId());
     const out: Survey[] = [];
     for (const s of summaries) {
       const decision = evaluate(
@@ -359,14 +392,57 @@ export class SankofaPulse {
     return '';
   }
 
-  private resolveExternalId(): string {
-    // The native module owns the anonymous distinct_id (RN's
-    // analog of the web SDK's anonymousId). Without a public
-    // getter we surface a host-overridable path: callers pass
-    // respondent.external_id explicitly when they need
-    // determinism. Best-effort fallback to a synthesized hosted-
-    // page id otherwise.
-    return `rn_${Math.random().toString(36).slice(2)}`;
+  private cachedRespondentId = '';
+  private respondentIdPromise: Promise<string> | null = null;
+  private static readonly RESPONDENT_ID_KEY = 'sankofa.pulse.respondent_id';
+
+  /**
+   * Resolve a STABLE respondent id for sampling / frequency-cap /
+   * dismiss-cooldown keys. The previous implementation returned a fresh
+   * `rn_${random}` on every call, which broke deterministic sampling
+   * (server-in / client-out A/B splits) and made cooldowns never match.
+   *
+   * Priority: the analytics distinct id (owned by the core, stable
+   * across launches) → a previously persisted random → a freshly minted
+   * random persisted write-once. Memoised so concurrent callers share
+   * one resolution and the id never changes mid-process.
+   */
+  private getRespondentId(): Promise<string> {
+    if (this.cachedRespondentId) return Promise.resolve(this.cachedRespondentId);
+    if (this.respondentIdPromise) return this.respondentIdPromise;
+    this.respondentIdPromise = (async () => {
+      // 1. Prefer the analytics distinct id (same source web uses as anonymousId).
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const SankofaNativeModule = require('../SankofaModule').default;
+        const fn = (SankofaNativeModule as any).getDistinctId;
+        if (typeof fn === 'function') {
+          const id = await fn();
+          if (id) {
+            this.cachedRespondentId = String(id);
+            return this.cachedRespondentId;
+          }
+        }
+      } catch {
+        // bridge unavailable — fall through
+      }
+      // 2. Reuse a previously persisted id (stable across launches).
+      try {
+        const stored = await PulseStorage.getItem(SankofaPulse.RESPONDENT_ID_KEY);
+        if (stored) {
+          this.cachedRespondentId = stored;
+          return stored;
+        }
+      } catch {
+        // storage unavailable — fall through
+      }
+      // 3. Mint once and persist write-once.
+      const minted = `rn_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+      this.cachedRespondentId = minted;
+      void PulseStorage.setItem(SankofaPulse.RESPONDENT_ID_KEY, minted);
+      return minted;
+    })();
+    return this.respondentIdPromise;
   }
 
   private buildContext(
@@ -395,6 +471,117 @@ export class SankofaPulse {
       priorResponseCount:
         (ctx.priorResponseCount as Record<string, number>) ?? {},
     };
+  }
+
+  // ── Auto-show pump ───────────────────────────────────────────
+  //
+  // Mirrors the web plugin's pump and the iOS implementation: on
+  // boot / foreground / navigation, pick the first eligible survey
+  // flagged auto_show that isn't inside its dismiss cooldown, wait
+  // display_delay_ms, then present it via show() (which the declarative
+  // <SurveyModalHost /> renders through onBundleChange).
+
+  private startAutoShowTriggers(): void {
+    if (this.autoShowStarted) return;
+    this.autoShowStarted = true;
+    try {
+      this.appStateSub = AppState.addEventListener('change', (next) => {
+        if (next === 'active') void this.maybeAutoShow();
+      });
+    } catch {
+      // AppState unavailable (test/SSR) — triggers degrade gracefully.
+    }
+    try {
+      this.screenUnsub = onScreenChange(() => void this.maybeAutoShow());
+    } catch {
+      // ignore
+    }
+    // Initial tick once the host has had a chance to mount the modal host.
+    setTimeout(() => void this.maybeAutoShow(), 0);
+  }
+
+  /**
+   * Re-evaluate auto-show. No-op while a survey is already presented,
+   * disabled, or nothing is eligible. Safe to call repeatedly.
+   */
+  async maybeAutoShow(options: PulseShowOptions = {}): Promise<void> {
+    if (!this.autoShowEnabled || this.currentBundle) return;
+    let summaries;
+    try {
+      summaries = await this.makeClient().listSurveys();
+    } catch {
+      return;
+    }
+    if (!summaries.length) return;
+    const respondentId =
+      options.respondent?.external_id ?? (await this.getRespondentId());
+    for (const s of summaries) {
+      if (this.autoShownThisSession.has(s.id)) continue;
+      if (s.auto_show === false) continue;
+      const decision = evaluate(
+        s.targeting_rules,
+        this.buildContext(s.id, respondentId, options),
+      );
+      if (!decision.eligible) continue;
+      const cooldownMs =
+        (s.display_cooldown_seconds ?? DEFAULT_COOLDOWN_SECONDS) * 1000;
+      if (await this.isRecentlyDismissed(s.id, respondentId, cooldownMs)) {
+        continue;
+      }
+      // Win the candidate; guard against the pump firing twice quickly.
+      if (this.currentBundle) return;
+      this.autoShownThisSession.add(s.id);
+      const delayMs = s.display_delay_ms ?? 0;
+      const present = () => {
+        if (!this.currentBundle && this.autoShowEnabled) {
+          void this.show(s.id, options);
+        }
+      };
+      if (delayMs > 0) {
+        setTimeout(present, delayMs);
+      } else {
+        present();
+      }
+      return; // one survey at a time
+    }
+  }
+
+  // ── Dismiss cooldown (mirrors web `sankofa.pulse.dismissed.*`) ──
+
+  private dismissKey(surveyId: string, respondentId: string): string {
+    return `sankofa.pulse.dismissed.${respondentId}.${surveyId}`;
+  }
+
+  private async isRecentlyDismissed(
+    surveyId: string,
+    respondentId: string,
+    cooldownMs: number,
+  ): Promise<boolean> {
+    if (cooldownMs <= 0) return false;
+    try {
+      const raw = await PulseStorage.getItem(
+        this.dismissKey(surveyId, respondentId),
+      );
+      if (!raw) return false;
+      const ts = Number(raw);
+      if (!Number.isFinite(ts)) return false;
+      return Date.now() - ts < cooldownMs;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Stamp a dismiss/complete so the pump honours the per-survey cooldown. */
+  private async stampDismiss(surveyId: string): Promise<void> {
+    try {
+      const respondentId = await this.getRespondentId();
+      await PulseStorage.setItem(
+        this.dismissKey(surveyId, respondentId),
+        String(Date.now()),
+      );
+    } catch {
+      // best-effort — worst case the survey re-shows on next trigger
+    }
   }
 }
 
