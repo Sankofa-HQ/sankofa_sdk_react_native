@@ -33,5 +33,9 @@ android {
 }
 
 dependencies {
-  implementation 'dev.sankofa.sdk:sankofa-android:1.0.0'
+  // 2.0.0 pulls in the parent SDK's hardening audit fixes + native Pulse
+  // auto-show (parity with iOS). The bridge's narrow API usage (init,
+  // SankofaConfig data class, screen/track/identify/reset/flush,
+  // replaySessionId) is source-compatible across the 1.x→2.x major bump.
+  implementation 'dev.sankofa.sdk:sankofa-android:2.0.0'
 }
