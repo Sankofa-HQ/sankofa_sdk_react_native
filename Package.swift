@@ -11,7 +11,9 @@ let package = Package(
         .library(name: "SankofaReactNative", targets: ["SankofaReactNative"])
     ],
     dependencies: [
-        .package(path: "../sankofa_sdk_ios"),
+        // Consume the released SankofaIOS (a relative path only resolves
+        // inside the monorepo; external SPM consumers need the published tag).
+        .package(url: "https://github.com/Sankofa-HQ/sankofa_sdk_ios.git", from: "1.0.1"),
     ],
     targets: [
         .target(

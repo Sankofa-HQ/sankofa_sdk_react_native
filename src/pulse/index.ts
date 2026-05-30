@@ -7,7 +7,7 @@
  */
 
 export { SankofaPulse } from './SankofaPulse';
-export { SurveyModal } from './SurveyModal';
+export { SurveyModal, SurveyModalHost } from './SurveyModal';
 export { PulseClient } from './PulseClient';
 export { SurveyState } from './PulseState';
 export type { StateSnapshot } from './PulseState';

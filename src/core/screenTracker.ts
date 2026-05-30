@@ -18,12 +18,34 @@
 
 let _currentScreen: string | undefined;
 
+type ScreenChangeListener = (screen: string | undefined) => void;
+const _screenListeners = new Set<ScreenChangeListener>();
+
 /** Replace the active screen name. Empty / undefined clears it. */
 export function setCurrentScreen(name: string | undefined): void {
-  _currentScreen = name && name.length > 0 ? name : undefined;
+  const next = name && name.length > 0 ? name : undefined;
+  if (next === _currentScreen) return;
+  _currentScreen = next;
+  // Notify subscribers (e.g. the Pulse auto-show pump re-evaluates on
+  // navigation — the RN analogue of the web pump's SPA-nav trigger).
+  for (const l of _screenListeners) {
+    try {
+      l(next);
+    } catch {
+      // a bad subscriber must not break screen tracking
+    }
+  }
 }
 
 /** Read the active screen name. Returns undefined if never set. */
 export function getCurrentScreen(): string | undefined {
   return _currentScreen;
+}
+
+/** Subscribe to screen changes. Returns an unsubscribe function. */
+export function onScreenChange(listener: ScreenChangeListener): () => void {
+  _screenListeners.add(listener);
+  return () => {
+    _screenListeners.delete(listener);
+  };
 }

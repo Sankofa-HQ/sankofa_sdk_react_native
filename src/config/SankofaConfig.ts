@@ -37,6 +37,9 @@ export class SankofaConfig implements SankofaModule, SankofaConfigAPI {
   private values: Record<string, ItemDecision> = {};
   private etag = '';
   private savedAt = 0;
+  /** See SankofaSwitch.serverApplied — guards the hydrate/handshake race
+   *  so a slow native read never clobbers fresher server config. */
+  private serverApplied = false;
   private defaults: Record<string, ItemDecision>;
   private listeners = new Map<string, Set<ConfigChangeListener>>();
 
@@ -54,6 +57,7 @@ export class SankofaConfig implements SankofaModule, SankofaConfigAPI {
     this.values = { ...incoming };
     this.etag = cfg.etag ?? '';
     this.savedAt = Date.now();
+    this.serverApplied = true;
     await this.persist();
     this.fire(changed, removed);
   }
@@ -156,6 +160,8 @@ export class SankofaConfig implements SankofaModule, SankofaConfigAPI {
       const parsed = JSON.parse(raw) as PersistedState;
       if (!parsed || typeof parsed !== 'object') return;
       if (parsed.savedAt && Date.now() - parsed.savedAt > STALE_MAX_MS) return;
+      // Never clobber fresher server config with the stale persisted snapshot.
+      if (this.serverApplied || (parsed.savedAt ?? 0) <= this.savedAt) return;
       this.values = parsed.values || {};
       this.etag = parsed.etag || '';
       this.savedAt = parsed.savedAt || 0;

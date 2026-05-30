@@ -44,6 +44,14 @@ export class SankofaSwitch implements SankofaModule, SankofaSwitchAPI {
   private defaults: Record<string, FlagDecision>;
   private listeners = new Map<string, Set<FlagChangeListener>>();
   private hydrated = false;
+  /**
+   * True once a server handshake has applied flags. The constructor
+   * fires hydrate() (slow native read) AND the Traffic Cop fires
+   * applyHandshake() concurrently; if hydrate resolves last it would
+   * clobber fresher server flags with stale persisted ones. This guard
+   * makes the server authoritative regardless of which wins the race.
+   */
+  private serverApplied = false;
 
   constructor(options: { defaults?: Record<string, FlagDecision> } = {}) {
     this.defaults = options.defaults ?? {};
@@ -69,6 +77,7 @@ export class SankofaSwitch implements SankofaModule, SankofaSwitchAPI {
     this.flags = { ...incoming };
     this.etag = cfg.etag ?? '';
     this.savedAt = Date.now();
+    this.serverApplied = true;
     await this.persist();
     this.fire(changed, removed);
   }
@@ -172,6 +181,9 @@ export class SankofaSwitch implements SankofaModule, SankofaSwitchAPI {
       const parsed = JSON.parse(raw) as PersistedState;
       if (!parsed || typeof parsed !== 'object') return;
       if (parsed.savedAt && Date.now() - parsed.savedAt > STALE_MAX_MS) return;
+      // A server handshake already won the race — never clobber fresh
+      // server flags with the stale persisted snapshot.
+      if (this.serverApplied || (parsed.savedAt ?? 0) <= this.savedAt) return;
       this.flags = parsed.flags || {};
       this.etag = parsed.etag || '';
       this.savedAt = parsed.savedAt || 0;

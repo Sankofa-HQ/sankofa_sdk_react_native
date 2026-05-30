@@ -23,7 +23,7 @@ package = JSON.parse(File.read(File.join(__dir__, 'package.json')))
 # ─────────────────────────────────────────────────────────────────────────────
 
 SANKOFA_IOS_REPO = 'https://github.com/Sankofa-HQ/sankofa_sdk_ios.git'
-SANKOFA_IOS_REF  = 'main'  # switch to a tag (e.g. 'v1.0.0') once SankofaIOS cuts releases
+SANKOFA_IOS_REF  = 'v1.0.1'  # released SankofaIOS tag (replay masking + queue durability)
 
 # Materialize SankofaIOS sources into ios/SankofaIOS/ before source_files is
 # glob-resolved.  Inline (not a `def`) because CocoaPods evaluates the podspec
