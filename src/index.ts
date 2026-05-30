@@ -202,6 +202,10 @@ export function getHandshakeEtag(): string {
   return _handshakeEtag;
 }
 
+/** Debug flag captured from the last initialize(), so runHandshake()
+ *  (which can be re-invoked on identity change) can log consistently. */
+let _handshakeDebug = false;
+
 /**
  * Module singletons constructed by `Sankofa.initialize()` when the
  * corresponding `enableX` flag is true. Exposed via `Sankofa.deploy`,
@@ -245,6 +249,103 @@ export function getHandshakeModules(): HandshakeModules | null {
  */
 export function waitForHandshake(): Promise<HandshakeModules | null> {
   return _handshakePromise ?? Promise.resolve(null);
+}
+
+/**
+ * Perform the unified handshake and route module flags to their handlers.
+ * Extracted so it can be re-run on identity change (identify/reset) — see
+ * `refreshHandshakeForIdentity`. Reads shared apiKey/endpoint live so a
+ * post-init key change is respected. Returns the routed modules (or null).
+ */
+function runHandshake(): Promise<HandshakeModules | null> {
+  return (async () => {
+    try {
+      // Defer to the next tick so modules constructed on the same
+      // synchronous pass land in the registry before we send the
+      // reverse handshake.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      const apiKey = getSharedApiKey();
+      const endpoint = getSharedEndpoint();
+      const installed = getInstalledModules().join(',');
+      const params = new URLSearchParams({
+        installed,
+        sdk: 'react-native',
+        platform: Platform.OS,
+        os_version: String(Platform.Version ?? ''),
+      });
+      let resolvedDistinctId = '';
+      try {
+        const maybeGetId = (SankofaNativeModule as any).getDistinctId;
+        if (typeof maybeGetId === 'function') {
+          const id = await maybeGetId();
+          if (id) {
+            resolvedDistinctId = String(id);
+            params.set('distinct_id', resolvedDistinctId);
+          }
+        }
+      } catch {
+        // Native module error — ignore, fall through.
+      }
+      try {
+        const maybeGetAnon = (SankofaNativeModule as any).getAnonymousId;
+        if (typeof maybeGetAnon === 'function') {
+          const anonId = await maybeGetAnon();
+          if (anonId && String(anonId) !== resolvedDistinctId) {
+            params.set('anon_id', String(anonId));
+          }
+        }
+      } catch {
+        // Older bridge builds don't expose getAnonymousId; skipping is fine.
+      }
+      const url = `${endpoint.replace(/\/$/, '')}/api/v1/handshake?${params}`;
+
+      const headers: Record<string, string> = { 'x-api-key': apiKey };
+      if (_handshakeEtag) headers['If-None-Match'] = _handshakeEtag;
+
+      const res = await fetch(url, { headers });
+
+      if (res.status === 304 && _handshakeModules) {
+        if (_handshakeDebug) {
+          console.log('[Sankofa] Handshake 304 — cached modules still current');
+        }
+        await routeHandshake(_handshakeModules);
+        return _handshakeModules;
+      }
+
+      if (!res.ok) return null;
+      const data = await res.json();
+      _handshakeModules = (data.modules as HandshakeModules) ?? null;
+      _handshakeEtag = res.headers.get('etag') ?? res.headers.get('ETag') ?? '';
+
+      if (_handshakeDebug) {
+        const mods = _handshakeModules;
+        console.log(
+          `[Sankofa] Handshake OK — analytics:${mods?.analytics?.enabled} replay:${mods?.replay?.enabled} deploy:${mods?.deploy?.enabled} catch:${mods?.catch?.enabled} switch:${mods?.switch?.enabled} config:${mods?.config?.enabled} (installed: ${installed})`,
+        );
+      }
+
+      await routeHandshake(_handshakeModules);
+      return _handshakeModules;
+    } catch (err) {
+      if (_handshakeDebug) {
+        console.warn('[Sankofa] Handshake failed:', err);
+      }
+      return null;
+    }
+  })();
+}
+
+/**
+ * Re-run the handshake for a changed identity (identify/reset). Clears the
+ * cached etag + modules first so the server can't reply 304 with the
+ * PRIOR user's flag/config payload (which routeHandshake would otherwise
+ * apply to the new identity). Fire-and-forget — updates modules in place.
+ */
+function refreshHandshakeForIdentity(): void {
+  _handshakeEtag = '';
+  _handshakeModules = null;
+  _handshakePromise = runHandshake();
 }
 
 /**
@@ -448,99 +549,8 @@ export const Sankofa = {
     // uses this to gate UI toggles for modules the SDK doesn't have.
     // Legacy SDKs (no `installed` param) default to "allow everything"
     // server-side so we stay backward compatible.
-    _handshakePromise = (async () => {
-      try {
-        // Defer to the next tick so modules constructed on the same
-        // synchronous pass (e.g. `new SankofaDeploy()` right after
-        // `Sankofa.initialize()`) land in the registry before we send
-        // the reverse handshake.
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-        const installed = getInstalledModules().join(',');
-        const params = new URLSearchParams({
-          installed,
-          sdk: 'react-native',
-          platform: Platform.OS, // 'ios' | 'android' | 'web'
-          os_version: String(Platform.Version ?? ''),
-        });
-        // Best-effort identity forwarding. The native bridge exposes a
-        // getDistinctId method when the Analytics module is linked;
-        // if it's not (Switch/Config-only integration) we skip the
-        // identity param and the server falls back to anonymous
-        // bucketing. Platform + OS targeting still works either way.
-        let resolvedDistinctId = '';
-        try {
-          const maybeGetId = (SankofaNativeModule as any).getDistinctId;
-          if (typeof maybeGetId === 'function') {
-            const id = await maybeGetId();
-            if (id) {
-              resolvedDistinctId = String(id);
-              params.set('distinct_id', resolvedDistinctId);
-            }
-          }
-        } catch {
-          // Native module error — ignore, fall through.
-        }
-        // Identity stitching: once identify() has fired, the bridge's
-        // getAnonymousId still returns the pre-identify id. Sending both
-        // lets the server fold pre- and post-identify flag evaluations
-        // into a single experiment subject. Only forward when the two
-        // ids diverge — otherwise anon_id is redundant with distinct_id.
-        try {
-          const maybeGetAnon = (SankofaNativeModule as any).getAnonymousId;
-          if (typeof maybeGetAnon === 'function') {
-            const anonId = await maybeGetAnon();
-            if (anonId && String(anonId) !== resolvedDistinctId) {
-              params.set('anon_id', String(anonId));
-            }
-          }
-        } catch {
-          // Older bridge builds don't expose getAnonymousId; skipping is
-          // correct (server treats empty anon_id as "no stitching needed").
-        }
-        const url = `${endpoint.replace(/\/$/, '')}/api/v1/handshake?${params}`;
-
-        const headers: Record<string, string> = { 'x-api-key': apiKey };
-        if (_handshakeEtag) headers['If-None-Match'] = _handshakeEtag;
-
-        const res = await fetch(url, { headers });
-
-        // 304 — the server says our cached modules are still current.
-        // Re-fire routeHandshake anyway so modules constructed between
-        // the previous handshake and now (hot reload, lazy imports)
-        // pick up the payload they missed.
-        if (res.status === 304 && _handshakeModules) {
-          if (config.debug) {
-            console.log('[Sankofa] Handshake 304 — cached modules still current');
-          }
-          await routeHandshake(_handshakeModules);
-          return _handshakeModules;
-        }
-
-        if (!res.ok) return null;
-        const data = await res.json();
-        _handshakeModules = (data.modules as HandshakeModules) ?? null;
-        _handshakeEtag = res.headers.get('etag') ?? res.headers.get('ETag') ?? '';
-
-        if (config.debug) {
-          const mods = _handshakeModules;
-          console.log(
-            `[Sankofa] Handshake OK — analytics:${mods?.analytics?.enabled} replay:${mods?.replay?.enabled} deploy:${mods?.deploy?.enabled} catch:${mods?.catch?.enabled} switch:${mods?.switch?.enabled} config:${mods?.config?.enabled} (installed: ${installed})`,
-          );
-        }
-
-        // Traffic Cop — route each enabled module flag to its registered
-        // handler. Flags for missing modules get a dev warning + prod no-op.
-        await routeHandshake(_handshakeModules);
-
-        return _handshakeModules;
-      } catch (err) {
-        if (config.debug) {
-          console.warn('[Sankofa] Handshake failed:', err);
-        }
-        return null;
-      }
-    })();
+    _handshakeDebug = config.debug ?? false;
+    _handshakePromise = runHandshake();
   },
 
   /**
@@ -579,6 +589,9 @@ export const Sankofa = {
    */
   identify(userId: string): void {
     SankofaNativeModule.identify(userId);
+    // Identity changed — re-handshake so flags/config are evaluated for the
+    // new user, and so a stale etag can't 304-reuse the prior user's payload.
+    refreshHandshakeForIdentity();
   },
 
   /**
@@ -596,6 +609,9 @@ export const Sankofa = {
    */
   reset(): void {
     SankofaNativeModule.reset();
+    // Back to anonymous — drop the cached etag/modules and re-handshake so
+    // the prior user's flags/config aren't served to the anonymous session.
+    refreshHandshakeForIdentity();
   },
 
   /**
