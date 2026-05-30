@@ -1,16 +1,22 @@
 {
   "name": "sankofa-react-native",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Sankofa Analytics SDK for React Native — event tracking, heatmaps, session replay.",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "files": [
     "src",
-    "ios",
-    "android",
+    "ios/*.swift",
+    "ios/*.h",
+    "ios/*.m",
+    "ios/*.mm",
+    "android/src",
+    "android/build.gradle",
     "*.podspec",
     "expo-module.config.json",
-    "app.plugin.js"
+    "app.plugin.js",
+    "LICENSE",
+    "README.md"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -42,8 +48,9 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/sankofa/sankofa"
+    "url": "git+https://github.com/Sankofa-HQ/sankofa_sdk_react_native.git"
   },
+  "homepage": "https://sankofa.dev",
   "license": "MIT",
   "peerDependencies": {
     "expo-modules-core": ">=1.0.0",

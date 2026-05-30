@@ -1,0 +1,21 @@
+# Build artifacts — never ship these in the npm tarball.
+android/build/
+android/.gradle/
+android/.cxx/
+ios/build/
+ios/Pods/
+ios/DerivedData/
+# Materialized at `pod install` time by the podspec prepare_command from the
+# released SankofaIOS tag — must NOT be shipped (it would mask the release ref).
+ios/SankofaIOS/
+
+# Dev-only
+.build/
+node_modules/
+test/
+**/__mocks__/
+**/*.test.ts
+*.log
+*.tgz
+.DS_Store
+Package.resolved
