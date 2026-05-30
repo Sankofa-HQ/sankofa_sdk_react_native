@@ -212,14 +212,19 @@ export class SankofaPulse {
 
   async submit(payload: {
     surveyId: string;
-    respondent: { user_id?: string; external_id: string; email?: string };
+    respondent?: { user_id?: string; external_id?: string; email?: string };
     answers: Record<string, unknown>;
     context?: Record<string, unknown>;
   }): Promise<{ id: string }> {
     const client = this.makeClient();
+    // Fill the respondent's external_id from the stable id when the caller
+    // (e.g. SurveyModalHost) doesn't supply one — keeps submit/sampling/
+    // cooldown all keyed to the same respondent.
+    const externalId =
+      payload.respondent?.external_id ?? (await this.getRespondentId());
     const result = await client.submit({
       survey_id: payload.surveyId,
-      respondent: payload.respondent,
+      respondent: { ...payload.respondent, external_id: externalId },
       answers: payload.answers,
       context: this.enrichContext(payload.context),
       screen: getCurrentScreen(),

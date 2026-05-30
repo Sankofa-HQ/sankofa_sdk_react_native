@@ -87,6 +87,73 @@ export const SurveyModal: React.FC<SurveyModalProps> = ({
   );
 };
 
+/**
+ * Minimal structural view of SankofaPulse the host needs — avoids a
+ * circular import between this file and SankofaPulse.
+ */
+interface PulseModalSource {
+  getCurrentBundle(): SurveyBundle | null;
+  onBundleChange(listener: (bundle: SurveyBundle | null) => void): () => void;
+  submit(payload: {
+    surveyId: string;
+    answers: Record<string, unknown>;
+  }): Promise<{ id: string }>;
+  dismiss(reason?: 'user' | 'host'): void;
+}
+
+export interface SurveyModalHostProps {
+  /** The SankofaPulse instance to render surveys for. */
+  pulse: PulseModalSource;
+  /** BCP-47 locale for translations (RN has no navigator.language). */
+  locale?: string;
+}
+
+/**
+ * Drop-in survey renderer. Mount ONCE at the app root:
+ *
+ *   <SurveyModalHost pulse={pulse} />
+ *
+ * It subscribes to `pulse.onBundleChange` and presents the SurveyModal
+ * whenever a survey is shown — by an explicit `pulse.show(id)` OR by the
+ * auto-show pump — and wires completion/dismissal back to the SDK. This
+ * is the glue between the imperative pulse instance and the controlled
+ * SurveyModal; without it, `show()` resolves a bundle that nothing renders.
+ */
+export const SurveyModalHost: React.FC<SurveyModalHostProps> = ({ pulse, locale }) => {
+  const [bundle, setBundle] = useState<SurveyBundle | null>(() =>
+    typeof pulse?.getCurrentBundle === 'function' ? pulse.getCurrentBundle() : null,
+  );
+
+  useEffect(() => {
+    if (!pulse?.onBundleChange) return undefined;
+    // onBundleChange fires immediately with the current bundle, so a survey
+    // already queued (auto-show fired before this mounted) renders at once.
+    const unsub = pulse.onBundleChange((b) => setBundle(b));
+    return unsub;
+  }, [pulse]);
+
+  if (!bundle) return null;
+
+  return (
+    <SurveyModal
+      visible
+      bundle={bundle}
+      locale={locale}
+      onComplete={async ({ answers }) => {
+        try {
+          await pulse.submit({ surveyId: bundle.survey.id, answers });
+        } catch {
+          // Submit failure is non-fatal — the survey still closes; the
+          // SDK queues the response for retry where applicable.
+        }
+      }}
+      onDismiss={() => {
+        if (typeof pulse?.dismiss === 'function') pulse.dismiss('user');
+      }}
+    />
+  );
+};
+
 interface RendererProps {
   bundle: SurveyBundle;
   locale?: string;

@@ -87,7 +87,7 @@ export type {
 // resolves targeting + branching locally against the same DSL the
 // server + web SDK use. Operators flip survey IDs from the dashboard;
 // the host app calls `pulse.show(surveyId)`.
-export { SankofaPulse, SurveyModal, evaluateTargeting, resolveNext } from './pulse';
+export { SankofaPulse, SurveyModal, SurveyModalHost, evaluateTargeting, resolveNext } from './pulse';
 export type {
   Survey,
   SurveyKind,
