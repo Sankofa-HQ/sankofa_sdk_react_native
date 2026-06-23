@@ -45,4 +45,6 @@ export interface SankofaConfigAPI {
   getAllKeys(): string[];
   getAll(): Record<string, unknown>;
   onChange(key: string, listener: ConfigChangeListener): () => void;
+  /** The etag of the last applied handshake payload (empty until one lands). */
+  getEtag(): string;
 }

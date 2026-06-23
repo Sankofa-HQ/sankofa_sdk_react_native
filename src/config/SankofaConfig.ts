@@ -4,6 +4,7 @@ import {
   deriveIntegrationLevel,
   type ModuleIntegrationStatus,
 } from '../core/integration';
+import { coerceConfigValue } from './coerce';
 import { ConfigStorage } from './ConfigStorage';
 import type {
   ConfigChangeListener,
@@ -109,7 +110,7 @@ export class SankofaConfig implements SankofaModule, SankofaConfigAPI {
   get<V>(key: string, defaultValue: V): V {
     const decision = this.resolve(key);
     if (!decision) return defaultValue;
-    return decision.value as V;
+    return coerceConfigValue(decision.value, defaultValue);
   }
 
   getDecision<V = unknown>(key: string): ItemDecision<V> | null {
