@@ -3,6 +3,7 @@ import { evaluate } from './targeting';
 import { PulseClient } from './PulseClient';
 import { PulseStorage } from './PulseStorage';
 import { getCurrentScreen, onScreenChange } from '../core/screenTracker';
+import { getEventCounts } from '../core/eventCounts';
 
 /** Default dismiss cooldown when the server omits one — 7 days, matching
  *  the dashboard default and the web/iOS SDKs. */
@@ -460,6 +461,11 @@ export class SankofaPulse {
       surveyId,
       respondentExternalId: externalId,
       pageUrl: typeof ctx.page_url === 'string' ? ctx.page_url : '',
+      // The SDK's live screen + this session's event tally, so KindScreen and
+      // KindEvent targeting can actually match on auto-show. A host-supplied
+      // context still wins (merged last).
+      screenName:
+        typeof ctx.screenName === 'string' ? ctx.screenName : getCurrentScreen(),
       userProperties: {
         ...(this.opts.defaultUserProperties ?? {}),
         ...((ctx.userProperties as Record<string, unknown>) ?? {}),
@@ -472,7 +478,10 @@ export class SankofaPulse {
         ...(this.opts.defaultFlagValues ?? {}),
         ...((ctx.flagValues as Record<string, unknown>) ?? {}),
       },
-      recentEvents: (ctx.recentEvents as Record<string, number>) ?? {},
+      recentEvents: {
+        ...getEventCounts(),
+        ...((ctx.recentEvents as Record<string, number>) ?? {}),
+      },
       priorResponseCount:
         (ctx.priorResponseCount as Record<string, number>) ?? {},
     };

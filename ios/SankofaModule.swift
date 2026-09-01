@@ -121,14 +121,20 @@ public class SankofaModule: Module {
 
     Function("screen") { (name: String, properties: [String: Any?]?) in
       let props = properties?.compactMapValues { $0 } as? [String: Any] ?? [:]
-      Sankofa.shared.screen(name, properties: props)
+      // initialize() runs on DispatchQueue.main.async, so dispatch here too:
+      // the main queue is FIFO, guaranteeing this lands AFTER init and never
+      // trips assertInitialized() (a hard preconditionFailure in DEBUG).
+      DispatchQueue.main.async { Sankofa.shared.screen(name, properties: props) }
     }
 
     // MARK: - track
 
     Function("track") { (event: String, properties: [String: Any?]?) in
       let props = properties?.compactMapValues { $0 } as? [String: Any] ?? [:]
-      Sankofa.shared.track(event, properties: props)
+      // Dispatch after init on the FIFO main queue (see screen()) — fixes the
+      // race where a track() fired right after initialize() hit the DEBUG
+      // preconditionFailure in assertInitialized() and crashed the app.
+      DispatchQueue.main.async { Sankofa.shared.track(event, properties: props) }
     }
 
     // MARK: - identify
@@ -151,19 +157,21 @@ public class SankofaModule: Module {
       extra.removeValue(forKey: "name")
       extra.removeValue(forKey: "email")
       extra.removeValue(forKey: "avatar")
-      Sankofa.shared.setPerson(name: name, email: email, avatar: avatar, properties: extra)
+      DispatchQueue.main.async {
+        Sankofa.shared.setPerson(name: name, email: email, avatar: avatar, properties: extra)
+      }
     }
 
     // MARK: - reset
 
     Function("reset") {
-      Sankofa.shared.reset()
+      DispatchQueue.main.async { Sankofa.shared.reset() }
     }
 
     // MARK: - flush
 
     Function("flush") {
-      Sankofa.shared.flush()
+      DispatchQueue.main.async { Sankofa.shared.flush() }
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -329,9 +337,14 @@ public class SankofaModule: Module {
     /// the wire shape distinguishes "no replay" from "replay
     /// session unknown".
     Function("getReplaySessionId") { () -> String in
-      MainActor.assumeIsolated {
-        Sankofa.shared.replaySessionId ?? ""
-      }
+      // Pulse reads this synchronously from the JS thread (OFF the main thread)
+      // to stamp survey responses with the replay session. `replaySessionId` is
+      // @MainActor, and `MainActor.assumeIsolated` TRAPS when not already on the
+      // main actor — which hard-crashed the app whenever Pulse was active. Hop to
+      // the main thread for the read; the isMainThread guard avoids a
+      // sync-on-self deadlock if a main-thread caller ever reaches this.
+      let read = { MainActor.assumeIsolated { Sankofa.shared.replaySessionId ?? "" } }
+      return Thread.isMainThread ? read() : DispatchQueue.main.sync(execute: read)
     }
 
     Function("deployGetDistinctId") { () -> String in

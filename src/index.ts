@@ -5,6 +5,7 @@ import { markCoreInitialized, routeHandshake, getInstalledModules } from './core
 import { reportIntegrationStatuses } from './core/integrationReporter';
 import type { ModuleIntegrationStatus as ModuleIntegrationStatusBase } from './core/integration';
 import { setCurrentScreen } from './core/screenTracker';
+import { bumpEvent } from './core/eventCounts';
 import { startPresenceHeartbeat, stopPresenceHeartbeat } from './core/presenceHeartbeat';
 import { emitScreenSeen } from './core/screenSeen';
 import { SankofaCatch } from './catch/SankofaCatch';
@@ -579,6 +580,7 @@ export const Sankofa = {
    * @param properties - Optional key-value metadata for the event.
    */
   track(event: string, properties: Record<string, unknown> = {}): void {
+    bumpEvent(event); // JS-side tally so Pulse KindEvent targeting can match
     SankofaNativeModule.track(event, properties);
   },
 
