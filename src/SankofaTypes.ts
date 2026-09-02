@@ -34,6 +34,14 @@ export interface SankofaInitConfig {
   maskAllInputs?: boolean;
 
   /**
+   * Session-replay capture resolution as a fraction of the device's native
+   * resolution. Higher = sharper replays but larger uploads. The native layer
+   * defaults to 0.35; raise toward 0.5–0.75 for legible text, 1.0 for full res.
+   * @default 0.35
+   */
+  captureScale?: number;
+
+  /**
    * Seconds between automatic event flushes while the app is foregrounded.
    * @default 30
    */

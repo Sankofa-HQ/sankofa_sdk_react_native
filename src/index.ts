@@ -421,6 +421,7 @@ export const Sankofa = {
       trackLifecycleEvents: config.trackLifecycleEvents ?? true,
       recordSessions: config.recordSessions ?? true,
       maskAllInputs: config.maskAllInputs ?? true,
+      captureScale: config.captureScale, // native clamps to its 0.35 default when undefined
       flushIntervalSeconds: config.flushIntervalSeconds ?? 30,
       batchSize: config.batchSize ?? 50,
       enableCatch,
