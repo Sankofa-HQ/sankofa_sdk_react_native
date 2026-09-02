@@ -1,6 +1,6 @@
 {
   "name": "sankofa-react-native",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Sankofa Analytics SDK for React Native — event tracking, heatmaps, session replay.",
   "main": "src/index.ts",
   "types": "src/index.ts",

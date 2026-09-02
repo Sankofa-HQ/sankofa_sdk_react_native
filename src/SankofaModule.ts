@@ -12,6 +12,7 @@ export interface NativeInitConfig {
   trackLifecycleEvents: boolean;
   recordSessions: boolean;
   maskAllInputs: boolean;
+  captureScale?: number; // replay capture resolution (native defaults to 0.35)
   flushIntervalSeconds: number;
   batchSize: number;
   // ── Catch (rolled-up native auto-start) ──
